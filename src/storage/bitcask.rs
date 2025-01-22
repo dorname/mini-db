@@ -9,6 +9,6 @@ pub struct BitCask {
 }
 /// KeyDir
 /// 维护key和（fileId、value_sz、value_pos、tstamp）的映射关系
-type KeyDir = std::collections::BTreeMap<Vec<u8>, (u8, u32)>;
+type KeyDir = std::collections::BTreeMap<Vec<u8>, (snowflake::ProcessUniqueId, u64, u8, u64)>;
 
 struct Log {}
