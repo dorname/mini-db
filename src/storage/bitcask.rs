@@ -2,15 +2,18 @@ use fs4::fs_std::FileExt;
 // use fs4::FileExt;
 use crate::db_error::Result;
 use sha3::{Digest, Sha3_256};
-use snowflake::ProcessUniqueId;
+use std::fs;
 use std::fs::{read_dir, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::vec;
+use tsid::create_tsid;
 
-const DB_BASE: &str = "/workspaces/rust_base_learning/mini-db/db/";
+// const DB_BASE: &str = "/workspaces/rust_base_learning/mini-db/db/";
+const DB_BASE: &str = "/project/rust_base_learning/mini-db/db/";
 const MAX_SIZE: u64 = 1024 * 1024 * 1024; // 1GB 的字节数
+
 /// 实现一个BitCask结构
 /// struct - BitCask
 /// 成员：
@@ -27,37 +30,55 @@ impl BitCask {
     /// 3、打开活跃的存储文件
     fn init_db() -> Result<Self> {
         let path = Path::new(DB_BASE);
-        let mut log_file_id = ProcessUniqueId::new().to_string() + "_active";
+        let mut log_file_id = create_tsid().number().to_string() + "_active";
         let mut db = Self {
             log: None,
             keydir: KeyDir::new(),
         };
         if (path.is_dir()) {
-            //1 、遍历目录下的所有文件
-            for log_entry in read_dir(path).unwrap() {
-                let file_path = log_entry.unwrap().path();
-                if (file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap()
-                    .ends_with("active"))
-                {
-                    log_file_id = file_path
+            //1 、遍历目录下的所有文件收集所有文件路径
+            let mut paths = read_dir(path)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.unwrap().path())
+                .collect::<Vec<_>>();
+            //2、根据时间大小排序 创建时间越晚文件名的数值越大
+            //活跃文件的文件名永远是最大的
+            if !paths.is_empty() {
+                paths.sort_by(|file_a, file_b| {
+                    let mut file_a_name = file_a.file_name().and_then(|n| n.to_str()).unwrap();
+                    file_a_name = file_a_name.strip_suffix("_active").unwrap_or(file_a_name);
+                    let mut file_b_name = file_b.file_name().and_then(|n| n.to_str()).unwrap();
+                    file_b_name = file_b_name.strip_suffix("_active").unwrap_or(file_b_name);
+                    file_a_name
+                        .to_string()
+                        .parse::<u64>()
+                        .unwrap()
+                        .cmp(&file_b_name.to_string().parse::<u64>().unwrap())
+                });
+                // 3、遍历文件集合，构建索引
+                paths.iter().for_each(|file_path| {
+                    if (file_path
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap()
-                        .to_string();
-                } else {
+                        .ends_with("active"))
+                    {
+                        log_file_id = file_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap()
+                            .to_string();
+                    }
                     db.build_key_dir(file_path);
-                }
+                });
             }
-            db.build_key_dir(PathBuf::from(DB_BASE.to_owned() + log_file_id.as_str()));
         }
         db.log = Some(Log::new(log_file_id).unwrap());
         Ok(db)
     }
     /// 构建索引
-    fn build_key_dir(&mut self, file_path: PathBuf) -> Result<String> {
+    fn build_key_dir(&mut self, file_path: &PathBuf) -> Result<String> {
         let file_id = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -116,18 +137,58 @@ impl BitCask {
     }
 
     /// 更新存储文件
-    /// 1、创建一个新的日志存储文件
-    /// 2、更新为活跃文件
-    fn refresh_active() {}
+    fn refresh_active(&mut self) {
+        //1、将当前活跃文件设置为非活跃文件
+        let file_id = self.log.as_mut().unwrap().file_id.clone();
+        fs::rename(
+            Path::new(&(DB_BASE.to_owned() + file_id.as_str())),
+            Path::new(
+                &(DB_BASE.to_owned()
+                    + file_id
+                        .as_str()
+                        .strip_suffix("_active")
+                        .unwrap_or(file_id.as_str())),
+            ),
+        )
+        .expect("重命名失败");
+        //2、创建新的活跃文件
+        let mut new_file_id = create_tsid().number().to_string() + "_active";
+        let new_log = Log::new(new_file_id).unwrap();
+        self.log = Some(new_log);
+    }
 
     /// 判断活跃文件是否超过了限制大小
-    fn check_size_limit(&self, file: std::fs::File) -> bool {
+    fn check_size_limit(file: &std::fs::File) -> bool {
         file.metadata().unwrap().len() >= MAX_SIZE
+    }
+    /// 写入条目数据
+    fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        // 1、检查活跃文件是否超过限制大小
+        if let Some(log) = &mut self.log {
+            if BitCask::check_size_limit(&log.file) {
+                // 2、更新活跃文件
+                self.refresh_active();
+            }
+        }
+
+        // 3、写入数据
+        if let Some(log) = &mut self.log {
+            let tstamp = crate::utils::get_timestamp_to_vec();
+            let mut log_entry = LogEntry::new(tstamp, key.clone(), value);
+            log_entry.build_crc(); // 构建crc校验字段
+            let crc_pos = log.write_entry(log_entry)?;
+
+            // 4、更新索引
+            self.keydir
+                .insert(key, (log.file_id.clone(), crc_pos as u32));
+        }
+
+        Ok(())
     }
 
     /// 读取条目数据
     /// 根据keyDir取获取
-    fn get(&mut self, key: Vec<u8>) -> Result<String> {
+    fn get(&mut self, key: Vec<u8>) -> Result<Option<String>> {
         // 1、根据key,从keydir中读相关的存储信息
         // KeyDir：key ——— (fileId、crc_pos）
         if let Some((file_id, crc_pos)) = self.keydir.get(&key) {
@@ -137,7 +198,7 @@ impl BitCask {
             let active = &mut self.log;
             match active {
                 None => {
-                    return Ok("".to_string());
+                    return Ok(None);
                 }
                 _ => {
                     let active_file_id = active.as_ref().unwrap().file_id.clone();
@@ -145,10 +206,10 @@ impl BitCask {
                         let entry = active.as_mut().unwrap().read_entry(*crc_pos)?;
                         match entry {
                             Some(e) => {
-                                return Ok(String::from_utf8_lossy(&e.value).to_string());
+                                return Ok(Some(String::from_utf8_lossy(&e.value).to_string()));
                             }
                             None => {
-                                return Ok("".to_string());
+                                return Ok(None);
                             }
                         }
                     }
@@ -156,16 +217,16 @@ impl BitCask {
                     let entry = old_file.read_entry(*crc_pos)?;
                     match entry {
                         Some(e) => {
-                            return Ok(String::from_utf8_lossy(&e.value).to_string());
+                            return Ok(Some(String::from_utf8_lossy(&e.value).to_string()));
                         }
                         None => {
-                            return Ok("".to_string());
+                            return Ok(None);
                         }
                     }
                 }
             };
         } else {
-            return Ok("".to_string());
+            return Ok(None);
         }
     }
 }
@@ -351,7 +412,7 @@ impl Log {
     /// 将条目写入文件
     fn write_entry(&mut self, log_entry: LogEntry) -> Result<u64> {
         // 1、计算存储条目的总大小
-        let total_size = log_entry.get_entry().len();
+        let total_size: usize = log_entry.get_entry().len();
         // 2、设置文件插入指针
         let pos = self.file.seek(SeekFrom::End(0))?;
         // 3、创建一个文件的缓冲区
@@ -360,7 +421,7 @@ impl Log {
         writer.write_all(&log_entry.get_entry())?;
         // 5、刷新缓冲区
         writer.flush()?;
-        Ok(pos)
+        Ok(pos + total_size as u64)
     }
 
     /// value位置、value大小、crc位置读取值
@@ -438,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_new_log() {
-        let file_id = ProcessUniqueId::new().to_string() + "_active";
+        let file_id = create_tsid().number().to_string() + "_active";
         let temp_path = DB_BASE.to_string() + file_id.as_str();
         println!("{:?}", temp_path);
         let mut log_db = Log::new(file_id).unwrap();
@@ -452,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_read_log() {
-        let file_id = "puid-0-0".to_string();
+        let file_id = "675727592794104102_active".to_string();
         let mut log_db = Log::new(file_id).unwrap();
         let pos = 23 as u64;
         let mut buf = vec![0u8; 5];
@@ -463,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_read_entry() {
-        let file_id = "puid-0-0_active".to_string();
+        let file_id = "675727592794104102_active".to_string();
         let mut log_db = Log::new(file_id).unwrap();
         // println!("{:?}", log_db.read_entry(0u32));
         let log_entry = log_db.read_entry(57u32).unwrap().unwrap();
@@ -473,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_write_entry() {
-        let file_id = "puid-0-0".to_string();
+        let file_id = "675727592794104102_active".to_string();
         let mut log_db = Log::new(file_id).unwrap();
         let tstamp = crate::utils::get_timestamp_to_vec();
         let key = "key_1".as_bytes().to_vec();
@@ -510,6 +571,27 @@ mod tests {
         let mut db = BitCask::init_db().unwrap();
         // 当key值相同时会出现索引覆盖
         println!("{:?}", db);
-        println!("{:?}", db.get("test_1".as_bytes().to_vec()));
+        println!("{:?}", db.get("key_3".as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn generate_id_test() {
+        println!(
+            "{:?}",
+            create_tsid().number().to_string().parse::<u64>().unwrap()
+        );
+        println!("{:?}", create_tsid().number().to_string());
+    }
+
+    #[test]
+    fn test_set() {
+        let mut db = BitCask::init_db().unwrap();
+        db.set("key_5".as_bytes().to_vec(), "value_5".as_bytes().to_vec());
+    }
+
+    #[test]
+    fn test_refresh_active() {
+        let mut db = BitCask::init_db().unwrap();
+        db.refresh_active();
     }
 }
