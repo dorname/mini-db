@@ -47,9 +47,11 @@ impl BitCask {
                         .and_then(|n| n.to_str())
                         .unwrap()
                         .to_string();
+                } else {
+                    db.build_key_dir(file_path);
                 }
-                db.build_key_dir(file_path);
             }
+            db.build_key_dir(PathBuf::from(DB_BASE.to_owned() + log_file_id.as_str()));
         }
         db.log = Some(Log::new(log_file_id).unwrap());
         Ok(db)
@@ -82,7 +84,7 @@ impl BitCask {
                     reader.seek(SeekFrom::Start(ksz_pos))?;
                     reader.read_exact(&mut len_buf)?;
                     let ksz = u32::from_be_bytes(len_buf);
-                    let key_pos = 20 + ksz as u64;
+                    let key_pos = 20 + crc_pos as u64;
                     let mut key = vec![0u8; ksz as usize];
                     reader.seek(SeekFrom::Start(key_pos))?;
                     reader.read_exact(&mut key)?;
@@ -105,7 +107,9 @@ impl BitCask {
                 Ok((key, file_id, None)) => {
                     self.keydir.remove(&key);
                 }
-                Err(_) => todo!(),
+                Err(_) => {
+                    println!("ERROR");
+                }
             }
         }
         Ok("构建完成".to_string())
@@ -123,11 +127,46 @@ impl BitCask {
 
     /// 读取条目数据
     /// 根据keyDir取获取
-    fn get(&self, key: Vec<u8>) -> Result<()> {
+    fn get(&mut self, key: Vec<u8>) -> Result<String> {
         // 1、根据key,从keydir中读相关的存储信息
         // KeyDir：key ——— (fileId、crc_pos）
-        let (file_id, crc_pos) = self.keydir.get(&key).unwrap();
-        Ok(())
+        if let Some((file_id, crc_pos)) = self.keydir.get(&key) {
+            // 2、判断Key是在活跃文件还是在非活跃文件
+            // 如果为活跃文件直接通过self.log 去读取数据
+            // 如果不是，则需要初始化一个old非活跃文件实体old_log 去读取数据
+            let active = &mut self.log;
+            match active {
+                None => {
+                    return Ok("".to_string());
+                }
+                _ => {
+                    let active_file_id = active.as_ref().unwrap().file_id.clone();
+                    if file_id.eq(&active_file_id) {
+                        let entry = active.as_mut().unwrap().read_entry(*crc_pos)?;
+                        match entry {
+                            Some(e) => {
+                                return Ok(String::from_utf8_lossy(&e.value).to_string());
+                            }
+                            None => {
+                                return Ok("".to_string());
+                            }
+                        }
+                    }
+                    let mut old_file = Log::new(file_id.to_string())?;
+                    let entry = old_file.read_entry(*crc_pos)?;
+                    match entry {
+                        Some(e) => {
+                            return Ok(String::from_utf8_lossy(&e.value).to_string());
+                        }
+                        None => {
+                            return Ok("".to_string());
+                        }
+                    }
+                }
+            };
+        } else {
+            return Ok("".to_string());
+        }
     }
 }
 /// KeyDir
@@ -164,7 +203,7 @@ struct LogEntry {
     crc: Vec<u8>,
     tstamp: Vec<u8>,
     ksz: u32,
-    value_sz: u32,
+    value_sz: i32,
     key: Vec<u8>,
     value: Vec<u8>,
 }
@@ -179,7 +218,10 @@ impl LogEntry {
     /// ```
     fn new(tstamp: Vec<u8>, key: Vec<u8>, value: Vec<u8>) -> Self {
         let ksz = key.len() as u32;
-        let value_sz = value.len() as u32;
+        let value_sz = match value.len() {
+            0 => -1,
+            _ => value.len() as i32,
+        };
         Self {
             crc: vec![],
             tstamp: tstamp,
@@ -249,9 +291,12 @@ impl LogEntry {
     /// 根据数组恢复成结构体
     fn from_bytes(bytes: Vec<u8>) -> Self {
         let ksz = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
-        let value_sz = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let value_sz = i32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let key = &bytes[20..(20 + ksz) as usize];
-        let value = &bytes[(20 + ksz) as usize..(20 + ksz + value_sz) as usize];
+        let value = match value_sz {
+            x if x > 0 => &bytes[(20 + ksz) as usize..(20 + ksz + value_sz as u32) as usize],
+            _ => &[0u8; 0],
+        };
         Self {
             crc: bytes[0..8].to_vec(),
             tstamp: bytes[8..12].to_vec(),
@@ -351,7 +396,6 @@ mod tests {
     use std::fs::read_dir;
 
     use super::*;
-    use serde::de::value;
     use sha3::{Digest, Sha3_256};
 
     #[test]
@@ -399,8 +443,8 @@ mod tests {
         println!("{:?}", temp_path);
         let mut log_db = Log::new(file_id).unwrap();
         let tstamp = crate::utils::get_timestamp_to_vec();
-        let key = "key_1".as_bytes().to_vec();
-        let value = "value_1".as_bytes().to_vec();
+        let key = "test_1".as_bytes().to_vec();
+        let value = "test-3333".as_bytes().to_vec();
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
         log_db.write_entry(log);
@@ -409,7 +453,6 @@ mod tests {
     #[test]
     fn test_read_log() {
         let file_id = "puid-0-0".to_string();
-        let temp_path = DB_BASE.to_string() + file_id.as_str();
         let mut log_db = Log::new(file_id).unwrap();
         let pos = 23 as u64;
         let mut buf = vec![0u8; 5];
@@ -420,10 +463,12 @@ mod tests {
 
     #[test]
     fn test_read_entry() {
-        let file_id = "puid-0-0".to_string();
+        let file_id = "puid-0-0_active".to_string();
         let mut log_db = Log::new(file_id).unwrap();
         // println!("{:?}", log_db.read_entry(0u32));
-        println!("{:?}", log_db.read_entry(28u32));
+        let log_entry = log_db.read_entry(57u32).unwrap().unwrap();
+        println!("{:?}", log_entry);
+        println!("{:?}", String::from_utf8_lossy(&log_entry.value));
     }
 
     #[test]
@@ -458,5 +503,13 @@ mod tests {
         let db = BitCask::init_db().unwrap();
         // 当key值相同时会出现索引覆盖
         println!("{:?}", db);
+    }
+
+    #[test]
+    fn test_get() {
+        let mut db = BitCask::init_db().unwrap();
+        // 当key值相同时会出现索引覆盖
+        println!("{:?}", db);
+        println!("{:?}", db.get("test_1".as_bytes().to_vec()));
     }
 }
