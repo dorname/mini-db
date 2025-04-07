@@ -1,12 +1,14 @@
+use crate::db_error::{self, Result};
+use crate::storage::engine::{Engine, EngineStatus};
 use fs4::fs_std::FileExt;
-// use fs4::FileExt;
-use crate::db_error::Result;
+use sha3::digest::impl_oid_carrier;
 use sha3::{Digest, Sha3_256};
 use std::fs;
 use std::fs::{read_dir, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::vec;
 use tsid::create_tsid;
 
@@ -35,7 +37,7 @@ impl BitCask {
             log: None,
             keydir: KeyDir::new(),
         };
-        if (path.is_dir()) {
+        if path.is_dir() {
             //1 、遍历目录下的所有文件收集所有文件路径
             let mut paths = read_dir(path)
                 .unwrap()
@@ -58,11 +60,11 @@ impl BitCask {
                 });
                 // 3、遍历文件集合，构建索引
                 paths.iter().for_each(|file_path| {
-                    if (file_path
+                    if file_path
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap()
-                        .ends_with("active"))
+                        .ends_with("active")
                     {
                         log_file_id = file_path
                             .file_name()
@@ -97,7 +99,7 @@ impl BitCask {
         let mut reader = BufReader::new(&mut file);
         let mut pos = reader.seek(SeekFrom::Start(0))?;
         // 从头开始扫描文件
-        while (pos < file_len) {
+        while pos < file_len {
             let result =
                 || -> std::result::Result<(Vec<u8>, String, Option<u32>), std::io::Error> {
                     let crc_pos = pos as u32;
@@ -113,7 +115,7 @@ impl BitCask {
                     reader.seek(SeekFrom::Start(value_sz_pos))?;
                     reader.read_exact(&mut len_buf)?;
                     let value_sz = i32::from_be_bytes(len_buf);
-                    if (value_sz > 0) {
+                    if value_sz > 0 {
                         pos = pos + 20 + ksz as u64 + value_sz as u64;
                         Ok((key, file_id.clone(), Some(crc_pos)))
                     } else {
@@ -152,7 +154,7 @@ impl BitCask {
         )
         .expect("重命名失败");
         //2、创建新的活跃文件
-        let mut new_file_id = create_tsid().number().to_string() + "_active";
+        let new_file_id = create_tsid().number().to_string() + "_active";
         let new_log = Log::new(new_file_id).unwrap();
         self.log = Some(new_log);
     }
@@ -161,11 +163,39 @@ impl BitCask {
     fn check_size_limit(file: &std::fs::File) -> bool {
         file.metadata().unwrap().len() >= MAX_SIZE
     }
+
+    // 判断Key是在活跃文件还是在非活跃文件
+    // 如果为活跃文件直接通过self.log 去读取数据
+    // 如果不是，则需要初始化一个old非活跃文件实体old_log 去读取数据
+    fn get_log_by_key(&self, key: Vec<u8>) -> Result<Option<Log>> {
+        let file_id = self
+            .keydir
+            .get(&key)
+            .map(|(file_id, _)| file_id.clone())
+            .unwrap();
+        let active = &self.log;
+        match active {
+            None => {
+                return Ok(None);
+            }
+            _ => {
+                let active_file_id = active.as_ref().unwrap().file_id.clone();
+                if file_id.eq(&active_file_id) {
+                    return Ok(Some(active.as_ref().unwrap().to_owned())); // 返回 Log 的克隆
+                }
+                let log = Log::new(file_id.to_string())?; // 创建新的 Log 实例
+                return Ok(Some(log)); // 返回新的 Log 实例
+            }
+        };
+    }
+}
+
+impl Engine for BitCask {
     /// 写入条目数据
-    fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+    fn set(&mut self, key: Vec<u8>, value: &str) -> Result<()> {
         // 1、检查活跃文件是否超过限制大小
         if let Some(log) = &mut self.log {
-            if BitCask::check_size_limit(&log.file) {
+            if BitCask::check_size_limit(&log.file.lock().unwrap()) {
                 // 2、更新活跃文件
                 self.refresh_active();
             }
@@ -174,47 +204,27 @@ impl BitCask {
         // 3、写入数据
         if let Some(log) = &mut self.log {
             let tstamp = crate::utils::get_timestamp_to_vec();
-            let mut log_entry = LogEntry::new(tstamp, key.clone(), value);
+            let mut log_entry = LogEntry::new(tstamp, key.clone(), value.as_bytes().to_vec());
             log_entry.build_crc(); // 构建crc校验字段
             let crc_pos = log.write_entry(log_entry)?;
-
+            println!("写入文件位置:{:?}", crc_pos);
             // 4、更新索引
             self.keydir
                 .insert(key, (log.file_id.clone(), crc_pos as u32));
         }
-
         Ok(())
     }
-
     /// 读取条目数据
     /// 根据keyDir取获取
     fn get(&mut self, key: Vec<u8>) -> Result<Option<String>> {
         // 1、根据key,从keydir中读相关的存储信息
         // KeyDir：key ——— (fileId、crc_pos）
-        if let Some((file_id, crc_pos)) = self.keydir.get(&key) {
-            // 2、判断Key是在活跃文件还是在非活跃文件
-            // 如果为活跃文件直接通过self.log 去读取数据
-            // 如果不是，则需要初始化一个old非活跃文件实体old_log 去读取数据
-            let active = &mut self.log;
-            match active {
-                None => {
-                    return Ok(None);
-                }
-                _ => {
-                    let active_file_id = active.as_ref().unwrap().file_id.clone();
-                    if file_id.eq(&active_file_id) {
-                        let entry = active.as_mut().unwrap().read_entry(*crc_pos)?;
-                        match entry {
-                            Some(e) => {
-                                return Ok(Some(String::from_utf8_lossy(&e.value).to_string()));
-                            }
-                            None => {
-                                return Ok(None);
-                            }
-                        }
-                    }
-                    let mut old_file = Log::new(file_id.to_string())?;
-                    let entry = old_file.read_entry(*crc_pos)?;
+        if let Some((_, crc_pos)) = self.keydir.get(&key) {
+            let log = self.get_log_by_key(key)?;
+            match log {
+                Some(mut log) => {
+                    println!("读取文件位置:{:?}", *crc_pos);
+                    let entry = log.read_entry(*crc_pos)?;
                     match entry {
                         Some(e) => {
                             return Ok(Some(String::from_utf8_lossy(&e.value).to_string()));
@@ -224,12 +234,158 @@ impl BitCask {
                         }
                     }
                 }
-            };
+                None => {
+                    return Ok(None);
+                }
+            }
         } else {
             return Ok(None);
         }
     }
+
+    fn delete(&mut self, key: Vec<u8>) -> Result<()> {
+        self.set(key.clone(), "")?;
+        self.flush()?;
+        self.keydir.remove(&key);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        //1、将缓冲区的数据刷入磁盘，非测试环境下
+
+        if let Some(log) = &mut self.log {
+            log.file.lock().unwrap().flush()?;
+        }
+        Ok(())
+    }
+
+    fn scan(&self, range: impl std::ops::RangeBounds<Vec<u8>>) -> Result<Vec<(Vec<u8>, String)>> {
+        Ok(self
+            .keydir
+            .range(range)
+            .map(|(key, value)| (key.clone(), value.0.clone()))
+            .collect::<Vec<(Vec<u8>, String)>>())
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        //1、获取所有的key
+        let keys = self.keydir.keys().cloned().collect::<Vec<_>>();
+        //2、删除所有的key
+        for key in keys {
+            self.delete(key)?;
+        }
+        Ok(())
+    }
+
+    fn status(&mut self) -> Result<EngineStatus> {
+        //1、获取所有key
+        let keys = self.keydir.keys().cloned().collect::<Vec<_>>();
+        // 获取所有存活的key
+        let live_keys = keys
+            .iter()
+            .filter(|&key| {
+                println!("获取key:{:?}", String::from_utf8_lossy(key));
+                match self.keydir.contains_key(key) {
+                    true => true,
+                    false => false, // 处理 Err 或 None 的情况
+                }
+            })
+            .collect::<Vec<_>>();
+        //2、计算所有键值的数量
+        let total_count = self.keydir.len();
+        let logical_size: u64 = self
+            .keydir
+            .iter()
+            .map(|(key, value)| {
+                let mut log = match self.get_log_by_key(key.clone()) {
+                    Ok(Some(log)) => log,
+                    _ => return 0, // 处理错误情况
+                };
+                match log.read_entry(value.1) {
+                    Ok(Some(entry)) => entry.get_entry().len(),
+                    _ => 0, // 处理错误情况
+                }
+            })
+            .sum::<usize>() as u64;
+        //3、计算所有数据的磁盘总占用空间
+        let path = Path::new(DB_BASE);
+        let mut total_disk_size = 0;
+        let mut live_disk_size = 0;
+        if path.is_dir() {
+            // 获取所有目录条目，并处理可能的错误
+            let entries: Vec<_> = match read_dir(path) {
+                Ok(dir) => dir.filter_map(|entry| entry.ok()).collect(),
+                Err(e) => {
+                    eprintln!("无法读取目录: {}", e);
+                    vec![] // 返回空数组，继续执行
+                }
+            };
+            // 遍历所有目录条目，计算总大小
+            total_disk_size = entries
+                .iter()
+                .filter_map(|entry| entry.path().metadata().ok())
+                .map(|metadata| metadata.len())
+                .sum();
+            //4、计算活跃数据的磁盘存储空间
+            live_disk_size = live_keys
+                .iter()
+                .map(|&key| {
+                    let log = self.get_log_by_key(key.clone()).unwrap();
+                    match log {
+                        Some(mut log) => {
+                            let value = self.keydir.get(&key.clone()).unwrap();
+                            log.read_entry(value.1).unwrap().unwrap().get_entry().len()
+                        }
+                        None => 0,
+                    }
+                })
+                .sum::<usize>() as u64;
+        }
+        let garbage_disk_size = total_disk_size - live_disk_size;
+
+        Ok(EngineStatus {
+            name: "bitcask".to_string(),
+            logical_size: logical_size as u64,
+            total_count: total_count as u64,
+            total_disk_size: total_disk_size as u64,
+            live_disk_size: live_disk_size as u64,
+            garbage_disk_size: garbage_disk_size as u64,
+        })
+    }
 }
+
+/// 迭代器结构体
+/// ScanIterator
+pub struct ScanIterator<'a> {
+    /// 迭代器
+    inner: std::collections::btree_map::Iter<'a, Vec<u8>, ValTuple>,
+    /// 所属日志
+    log: &'a mut Log,
+}
+impl<'a> ScanIterator<'a> {
+    fn map(&mut self, item: (&Vec<u8>, &ValTuple)) -> <Self as Iterator>::Item {
+        let (key, value) = item;
+        Ok((
+            key.clone(),
+            self.log.read_entry(value.1).unwrap().unwrap().value,
+        ))
+    }
+}
+/// 实现由前向后迭代功能
+impl<'a> Iterator for ScanIterator<'a> {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|item| self.map(item))
+    }
+}
+/// 实现由后向前迭代功能
+impl<'a> DoubleEndedIterator for ScanIterator<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(|item| self.map(item))
+    }
+}
+
 /// KeyDir
 /// 维护key和（fileId、crc_pos）的映射关系
 /// 因为基于当前设计crc、tstamp、ksz、value_sz均为定长数组
@@ -240,11 +396,11 @@ type ValTuple = (String, u32);
 /// file_path 文件路径
 /// file 文件实体
 /// current_offset
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Log {
     file_id: String,
     file_path: PathBuf,
-    file: std::fs::File,
+    file: Arc<Mutex<std::fs::File>>, // 使用 Arc 和 Mutex 包装 File
     current_offset: u32,
 }
 
@@ -395,7 +551,7 @@ impl Log {
         file.try_lock_exclusive()?;
         Ok(Self {
             file_path: path,
-            file: file,
+            file: Arc::new(Mutex::new(file)),
             file_id: file_id,
             current_offset: 0,
         })
@@ -413,41 +569,75 @@ impl Log {
     fn write_entry(&mut self, log_entry: LogEntry) -> Result<u64> {
         // 1、计算存储条目的总大小
         let total_size: usize = log_entry.get_entry().len();
+        let pos;
         // 2、设置文件插入指针
-        let pos = self.file.seek(SeekFrom::End(0))?;
+        let mut file = self.file.lock().unwrap();
+        pos = file.seek(SeekFrom::End(0))?;
         // 3、创建一个文件的缓冲区
-        let mut writer = BufWriter::with_capacity(total_size, &self.file);
-        // 4、写数据入缓冲区
-        writer.write_all(&log_entry.get_entry())?;
-        // 5、刷新缓冲区
-        writer.flush()?;
-        Ok(pos + total_size as u64)
+        {
+            let mut writer = BufWriter::with_capacity(total_size, &mut *file);
+            // 4、写数据入缓冲区
+            writer.write_all(&log_entry.get_entry())?;
+            // 5、刷新缓冲区
+            writer.flush()?;
+        } // 这里结束了对 writer 的借用
+          // 6、回到文件中数据的起始位置
+        file.rewind()?;
+
+        // 7、返回文件中数据的起始位置
+        Ok(pos as u64)
     }
 
     /// value位置、value大小、crc位置读取值
     fn read_entry(&mut self, crc_pos: u32) -> Result<Option<LogEntry>> {
         // 1、计算ksz
         let mut ksz_v = [0u8; 4];
-        let ksz_pos = (crc_pos + 12) as usize;
-        self.file.seek(SeekFrom::Start(ksz_pos as u64))?;
-        self.file.read_exact(&mut ksz_v)?;
+        let ksz_pos = (crc_pos + 12) as u64;
+        let mut file = self.file.lock().unwrap();
+
+        if let Err(e) = file.seek(SeekFrom::Start(ksz_pos)) {
+            eprintln!("定位文件指针时出错: {}", e);
+            return Err(e.into());
+        }
+
+        if let Err(e) = file.read_exact(&mut ksz_v) {
+            eprintln!("读取 ksz 时出错: {}", e);
+            return Err(e.into());
+        }
+
         let ksz = u32::from_be_bytes(ksz_v);
         // 2、计算value_sz
         let mut value_sz_v = [0u8; 4];
-        let value_pos = (crc_pos + 16) as usize;
-        self.file.seek(SeekFrom::Start(value_pos as u64))?;
-        self.file.read_exact(&mut value_sz_v)?;
+        let value_pos = (crc_pos + 16) as u64;
+        if let Err(e) = file.seek(SeekFrom::Start(value_pos)) {
+            eprintln!("定位文件指针时出错: {}", e);
+            return Err(e.into());
+        }
+
+        if let Err(e) = file.read_exact(&mut value_sz_v) {
+            eprintln!("读取 value_sz 时出错: {}", e);
+            return Err(e.into());
+        }
         let value_sz = u32::from_be_bytes(value_sz_v);
         // 3、计算条目总长度，并构建结构体
-        let entry_len = 20 + ksz + value_sz;
+        let entry_len: usize = (20u32 + ksz + value_sz) as usize;
+
         let mut entry = vec![0u8; entry_len as usize];
-        self.file.seek(SeekFrom::Start(crc_pos as u64))?;
-        self.file.read_exact(&mut entry)?;
+        if let Err(e) = file.seek(SeekFrom::Start(crc_pos as u64)) {
+            eprintln!("定位文件指针时出错: {}", e);
+            return Err(e.into());
+        }
+
+        if let Err(e) = file.read_exact(&mut entry) {
+            eprintln!("读取条目时出错: {}", e);
+            return Err(e.into());
+        }
         let log_entry = LogEntry::from_bytes(entry);
         // 4、检验完整性
         if (self.check_crc(log_entry.crc.clone(), log_entry.get_entry()[8..].to_vec())) {
             return Ok(Some(log_entry));
         }
+        file.rewind()?;
         Ok(None)
     }
 }
@@ -517,8 +707,9 @@ mod tests {
         let mut log_db = Log::new(file_id).unwrap();
         let pos = 23 as u64;
         let mut buf = vec![0u8; 5];
-        log_db.file.seek(SeekFrom::Start(pos)).unwrap();
-        log_db.file.read_exact(&mut buf).unwrap();
+        let mut file = log_db.file.lock().unwrap();
+        file.seek(SeekFrom::Start(pos)).unwrap();
+        file.read_exact(&mut buf).unwrap();
         println!("{:?}", String::from_utf8_lossy(&buf));
     }
 
@@ -568,10 +759,41 @@ mod tests {
 
     #[test]
     fn test_get() {
+        // 清理测试数据
+        let path = Path::new(DB_BASE);
+
         let mut db = BitCask::init_db().unwrap();
-        // 当key值相同时会出现索引覆盖
-        println!("{:?}", db);
-        println!("{:?}", db.get("key_3".as_bytes().to_vec()));
+
+        // 写入测试数据
+        let key = "key_4".as_bytes().to_vec();
+        let value = "test";
+        // println!("开始写入数据");
+        db.set(key.clone(), value);
+        println!(
+            "写入文件位置指针:{:?}",
+            db.get_log_by_key(key.clone())
+                .unwrap()
+                .unwrap()
+                .file
+                .lock()
+                .unwrap()
+                .stream_position()
+        );
+
+        // 读取测试数据
+        println!("开始读取数据");
+        match db.get(key.clone()) {
+            Ok(Some(val)) => {
+                println!("读取成功: {}", val);
+                assert_eq!(val, value);
+            }
+            Ok(None) => {
+                panic!("未找到键: {:?}", String::from_utf8_lossy(&key));
+            }
+            Err(e) => {
+                panic!("读取数据时出错: {}", e);
+            }
+        }
     }
 
     #[test]
@@ -586,12 +808,22 @@ mod tests {
     #[test]
     fn test_set() {
         let mut db = BitCask::init_db().unwrap();
-        db.set("key_5".as_bytes().to_vec(), "value_5".as_bytes().to_vec());
+        // db.set(10u32.to_be_bytes().to_vec(), "");
+        db.set("key_1".as_bytes().to_vec(), "value_1");
     }
 
     #[test]
     fn test_refresh_active() {
         let mut db = BitCask::init_db().unwrap();
         db.refresh_active();
+    }
+
+    #[test]
+    fn test_status() {
+        let mut db = BitCask::init_db().unwrap();
+        db.set(10u32.to_be_bytes().to_vec(), "value_5");
+        db.delete(10u32.to_be_bytes().to_vec());
+        // db.flush().unwrap();
+        println!("{:?}", db.status().unwrap());
     }
 }
