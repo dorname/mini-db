@@ -14,6 +14,8 @@ pub enum Error {
     ReadOnly,
     /// 串行事务冲突：由不同writer，必须进行重试
     Serialization,
+    //配置错误
+    ConfigError,
 }
 
 /// 自定义错误类型
@@ -32,6 +34,7 @@ impl std::fmt::Display for Error {
             Error::ParserError(msg) => write!(f, "parser error:{msg}"),
             Error::ReadOnly => write!(f, "error: readonly"),
             Error::Serialization => write!(f, "error: Serialization"),
+            Error::ConfigError => write!(f,"error: config error"),
         }
     }
 }

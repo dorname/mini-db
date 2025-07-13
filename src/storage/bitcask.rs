@@ -44,7 +44,7 @@ impl BitCask {
                 .into_iter()
                 .map(|e| e.unwrap().path())
                 .collect::<Vec<_>>();
-            //2、根据时间大小排序 创建时间越晚文件名的数值越大
+            //2、根据时间大小排序 创建时间越晚文件名的数值越大 
             //活跃文件的文件名永远是最大的
             if !paths.is_empty() {
                 paths.sort_by(|file_a, file_b| {
@@ -187,6 +187,13 @@ impl BitCask {
                 return Ok(Some(log)); // 返回新的 Log 实例
             }
         };
+    }
+    /// compact方法
+    /// 压缩活跃日志文件：
+    /// 1、创建新的日志文件，将所有活跃的键写入新的日志文件
+    /// 2、删除旧的日志文件
+    fn compact(){
+        
     }
 }
 
