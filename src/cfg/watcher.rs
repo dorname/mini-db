@@ -1,113 +1,60 @@
+use crate::cfg::{load_config, watcher, Config};
 use notify::{Event, RecursiveMode, Result, Watcher};
-use std::{path::Path, sync::mpsc};
-use crate::cfg::{Config, load_config};
+use std::{path::{self, Path},sync::Arc};
+use tokio::{sync::{mpsc,broadcast},task};
 
 /// 监听配置文件变化，更新全局的配置实例
-pub fn watch_config(config:&mut Config)->crate::db_error::Result<()>{
-    let (tx, rx) = mpsc::channel::<Result<Event>>();
-    let mut watcher = notify::recommended_watcher(tx)?;
-    let target = Path::new("src/config.toml");
-    watcher.watch(target, RecursiveMode::NonRecursive)?;
-    // 监听更新内容，更新全局的配置实例
-    for res in rx {
-        match res {
-            Ok(event) => {
-                println!("event: {:?}", event);
-                // 解析配置文件
-                let new_config:Config = load_config()?;
-                // 更新全局的配置实例
-                *config = new_config;
+pub async fn watch_config(config: Arc<Config>,
+mut shutdown: broadcast::Receiver<()>) -> crate::db_error::Result<()> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event>>();
+    let path = Path::new("src/config.toml");
+    // 1、在阻塞线程里运行文件系统 watcher
+    task::spawn_blocking(move || -> crate::db_error::Result<()>{
+        let mut watcher = notify::recommended_watcher(move |res|{
+            // 将事件推送到Tokio通道；忽略send 失败(接收端关闭)
+            let _=tx.send(res);
+        })?;
+        watcher.watch(path, RecursiveMode::NonRecursive)?;
+
+        // 阻塞驻留： 直到进程推出或通道关闭
+        std::thread::park();
+        Ok(())
+    });
+    // 主异步循环：消费事件 + 更新配置
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.recv() => {
+                break;
             }
-            Err(e) => {
-                println!("error: {:?}", e);
-            }
-        }
-    }   
-    Ok(())
-}
-#[cfg(test)]
-mod tests{
-
-    use notify::{Event, RecursiveMode, Result, Watcher, EventKind};
-    use notify::event::{AccessKind, AccessMode};
-    use std::{path::Path, sync::mpsc};
- 
-
-    #[test]
-    #[ignore]
-    fn test_notify()->Result<()>{
-        let (tx, rx) = mpsc::channel::<Result<Event>>();
-
-        // Use recommended_watcher() to automatically select the best implementation
-        // for your platform. The `EventHandler` passed to this constructor can be a
-        // closure, a `std::sync::mpsc::Sender`, a `crossbeam_channel::Sender`, or
-        // another type the trait is implemented for.
-        let mut watcher = notify::recommended_watcher(tx)?;
-    
-        // 方法1：直接监听config.toml文件
-        let target = Path::new("src/config.toml");
-        watcher.watch(target, RecursiveMode::NonRecursive)?;
-        
-        // 方法2：或者监听父目录并递归监听（如果需要监听多个配置文件）
-        // watcher.watch(target.parent().unwrap(), RecursiveMode::Recursive)?;
-    
-        // 存储文件的前一个内容
-        let mut previous_content = String::new();
-        
-        // 4. 阻塞等待并处理事件
-        for res in rx {
-            match res {
-                Ok(event) => {
-                    println!("event: {:?}", event);
-                    
-                    // 检查是否是写操作
-                    if let EventKind::Access(AccessKind::Close(AccessMode::Write)) = event.kind {
-                        // 读取文件当前内容
-                        match std::fs::read_to_string(target) {
-                            Ok(current_content) => {
-                                if current_content != previous_content {
-                                    println!("=== 文件内容发生变化 ===");
-                                    if !previous_content.is_empty() {
-                                        println!("=== 修改前的内容 ===");
-                                        println!("{}", previous_content);
-                                        println!("=== 修改后的内容 ===");
-                                        println!("{}", current_content);
-                                        
-                                        // 简单的差异显示
-                                        let lines_before: Vec<&str> = previous_content.lines().collect();
-                                        let lines_after: Vec<&str> = current_content.lines().collect();
-                                        
-                                        println!("=== 内容差异 ===");
-                                        for (i, (before, after)) in lines_before.iter().zip(lines_after.iter()).enumerate() {
-                                            if before != after {
-                                                println!("第{}行: '{}' -> '{}'", i + 1, before, after);
-                                            }
-                                        }
-                                        
-                                        // 处理新增或删除的行
-                                        if lines_after.len() > lines_before.len() {
-                                            for i in lines_before.len()..lines_after.len() {
-                                                println!("新增第{}行: '{}'", i + 1, lines_after[i]);
-                                            }
-                                        } else if lines_before.len() > lines_after.len() {
-                                            for i in lines_after.len()..lines_before.len() {
-                                                println!("删除第{}行: '{}'", i + 1, lines_before[i]);
-                                            }
-                                        }
-                                    } else {
-                                        println!("=== 文件内容（首次读取）===");
-                                        println!("{}", current_content);
-                                    }
-                                    previous_content = current_content;
-                                }
+            opt = rx.recv() => {
+                match opt {
+                    Some(Ok(ev)) if ev.kind.is_modify() => {
+                        println!("配置文件发生变化: {:?}", ev);
+                        // 重新加载配置
+                        match load_config() {
+                            Ok(new_config) => {
+                                // 更新全局配置
+                                println!("配置已更新");
                             }
-                            Err(e) => eprintln!("读取文件失败: {e:?}"),
+                            Err(e) => {
+                                eprintln!("重新加载配置失败: {}", e);
+                            }
                         }
                     }
+                    Some(Ok(ev)) => {
+                        println!("文件事件: {:?}", ev);
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("监听错误: {:?}", e);
+                    }
+                    None => {
+                        // 通道关闭，退出循环
+                        break;
+                    }
                 }
-                Err(e)    => eprintln!("watch error: {e:?}"),
             }
         }
-        Ok(())
     }
+    Ok(())
 }

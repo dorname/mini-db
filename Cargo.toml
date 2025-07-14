@@ -10,5 +10,6 @@ lazy_static = "1.5.0"
 notify = "8.1.0"
 serde = { version = "1.0.217", features = ["derive"] }
 sha3 = "0.10.8"
+tokio = "1.46.1"
 toml = "0.9.2"
 tsid = "0.3.1"

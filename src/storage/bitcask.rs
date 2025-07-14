@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::vec;
 use tsid::create_tsid;
 use lazy_static::lazy_static;
-use crate::cfg::{load_config, Config, watch_config};
+use crate::cfg::{load_config, Config};
 
 // 全局配置
 lazy_static!{
@@ -35,7 +35,6 @@ impl BitCask {
     /// 2、构建全局KeyDir——索引
     /// 3、打开活跃的存储文件
     fn init_db() -> Result<Self> {
-        watch_config(&mut CONFIG.lock().unwrap())?;
         let path = Path::new(DB_BASE.as_str());
         let mut log_file_id = create_tsid().number().to_string() + "_active";
         let mut db = Self {
