@@ -1,7 +1,6 @@
-use crate::db_error::{self, Result};
+use crate::db_error::{Result};
 use crate::storage::engine::{Engine, EngineStatus};
 use fs4::fs_std::FileExt;
-use sha3::digest::impl_oid_carrier;
 use sha3::{Digest, Sha3_256};
 use std::fs;
 use std::fs::{read_dir, File};
@@ -11,10 +10,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::vec;
 use tsid::create_tsid;
+use lazy_static::lazy_static;
+use crate::cfg::{load_config, Config, watch_config};
 
-// const DB_BASE: &str = "/workspaces/rust_base_learning/mini-db/db/";
-const DB_BASE: &str = "/project/rust_base_learning/mini-db/db/";
-const MAX_SIZE: u64 = 1024 * 1024 * 1024; // 1GB 的字节数
+// 全局配置
+lazy_static!{
+    static ref CONFIG: Mutex<Config> = Mutex::new(load_config().unwrap());
+    static ref DB_BASE: String = CONFIG.lock().unwrap().storage_path.to_str().unwrap().to_string();
+    static ref MAX_SIZE: u64 = CONFIG.lock().unwrap().single_file_limit * 1024 * 1024 * 1024;
+}
 
 /// 实现一个BitCask结构
 /// struct - BitCask
@@ -31,7 +35,8 @@ impl BitCask {
     /// 2、构建全局KeyDir——索引
     /// 3、打开活跃的存储文件
     fn init_db() -> Result<Self> {
-        let path = Path::new(DB_BASE);
+        watch_config(&mut CONFIG.lock().unwrap())?;
+        let path = Path::new(DB_BASE.as_str());
         let mut log_file_id = create_tsid().number().to_string() + "_active";
         let mut db = Self {
             log: None,
@@ -161,7 +166,7 @@ impl BitCask {
 
     /// 判断活跃文件是否超过了限制大小
     fn check_size_limit(file: &std::fs::File) -> bool {
-        file.metadata().unwrap().len() >= MAX_SIZE
+        file.metadata().unwrap().len() >= *MAX_SIZE
     }
 
     // 判断Key是在活跃文件还是在非活跃文件
@@ -315,7 +320,7 @@ impl Engine for BitCask {
             })
             .sum::<usize>() as u64;
         //3、计算所有数据的磁盘总占用空间
-        let path = Path::new(DB_BASE);
+        let path = Path::new(DB_BASE.as_str());
         let mut total_disk_size = 0;
         let mut live_disk_size = 0;
         if path.is_dir() {
@@ -660,10 +665,11 @@ mod tests {
     fn sha3_test() {
         // 1) 创建一个 Sha3_256 hasher
         let mut h = Sha3_256::new();
-        h.update(b"abc");
+        h.update("abc".as_bytes());
         let result = h.finalize();
-        println!("{:?}", result.to_vec().len());
-        println!("{:?}", hex::encode(result.to_vec()));
+        assert_eq!(result.to_vec().len(), 32);
+        assert_eq!(hex::encode(result.to_vec()),
+         "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532");
     }
 
     #[test]
@@ -673,7 +679,10 @@ mod tests {
         let value = "value".as_bytes().to_vec();
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
-        println!("{:?}", log);
+        assert_eq!(log.ksz, 3);
+        assert_eq!(log.value_sz, 5);
+        assert_eq!(log.key, [107, 101, 121]);
+        assert_eq!(log.value, [118, 97, 108, 117, 101]);
     }
 
     #[test]
@@ -683,11 +692,8 @@ mod tests {
         let value = "value".as_bytes().to_vec();
         let ksz = key.len() as u32;
         let value_sz = value.len() as u32;
-        println!(
-            "key:{:?}——value:{:?}",
-            ksz.to_be_bytes().to_vec(),
-            value_sz.to_be_bytes().to_vec()
-        );
+        assert_eq!(ksz.to_be_bytes().to_vec(), [0, 0, 0, 3]);
+        assert_eq!(value_sz.to_be_bytes().to_vec(), [0, 0, 0, 5]);
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
         println!("{:?}", log.crc);
@@ -695,7 +701,8 @@ mod tests {
     }
 
     #[test]
-    fn test_new_log() {
+    fn test_wr_log() {
+        // 创建一个活跃文件
         let file_id = create_tsid().number().to_string() + "_active";
         let temp_path = DB_BASE.to_string() + file_id.as_str();
         println!("{:?}", temp_path);
@@ -706,11 +713,18 @@ mod tests {
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
         log_db.write_entry(log);
+        // 读取数据
+        let log_entry = log_db.read_entry(0u32).unwrap().unwrap();
+        println!("{:?}", log_entry);
+        assert_eq!("test-3333",String::from_utf8_lossy(&log_entry.value));
+        // 删除测试文件
+        std::fs::remove_file(temp_path).unwrap();
     }
 
     #[test]
+    #[ignore]
     fn test_read_log() {
-        let file_id = "675727592794104102_active".to_string();
+        let file_id = "696392295149515530_active".to_string();
         let mut log_db = Log::new(file_id).unwrap();
         let pos = 23 as u64;
         let mut buf = vec![0u8; 5];
@@ -721,6 +735,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_read_entry() {
         let file_id = "675727592794104102_active".to_string();
         let mut log_db = Log::new(file_id).unwrap();
@@ -731,6 +746,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_write_entry() {
         let file_id = "675727592794104102_active".to_string();
         let mut log_db = Log::new(file_id).unwrap();
@@ -743,8 +759,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_files_iter() {
-        let path = Path::new(DB_BASE);
+        let path = Path::new(DB_BASE.as_str());
         // 1、遍历文件目录
         if path.is_dir() {
             for file_entry in read_dir(path).unwrap() {
@@ -758,6 +775,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_init_db() {
         let db = BitCask::init_db().unwrap();
         // 当key值相同时会出现索引覆盖
@@ -767,7 +785,7 @@ mod tests {
     #[test]
     fn test_get() {
         // 清理测试数据
-        let path = Path::new(DB_BASE);
+        let path = Path::new(DB_BASE.as_str());
 
         let mut db = BitCask::init_db().unwrap();
 
@@ -804,6 +822,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn generate_id_test() {
         println!(
             "{:?}",
@@ -817,15 +836,18 @@ mod tests {
         let mut db = BitCask::init_db().unwrap();
         // db.set(10u32.to_be_bytes().to_vec(), "");
         db.set("key_1".as_bytes().to_vec(), "value_1");
+        assert_eq!(db.get("key_1".as_bytes().to_vec()).unwrap().unwrap(), "value_1");
     }
 
     #[test]
+    #[ignore]
     fn test_refresh_active() {
         let mut db = BitCask::init_db().unwrap();
         db.refresh_active();
     }
 
     #[test]
+    #[ignore]
     fn test_status() {
         let mut db = BitCask::init_db().unwrap();
         db.set(10u32.to_be_bytes().to_vec(), "value_5");

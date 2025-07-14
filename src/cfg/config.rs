@@ -1,10 +1,15 @@
 use std::path::PathBuf;
 
-use serde::de;
+use serde::{Deserialize, Serialize};
 
-use crate::{db_error::Result, storage};
+use crate::{db_error::Result};
 
-#[derive(Debug,Default)]
+#[derive(Debug,Default,Deserialize,Serialize)]
+pub struct ConfigWrapper {
+    pub config: Config
+}
+
+#[derive(Debug,Default,Deserialize,Serialize)]
 pub struct Config{
 
     // 存储路径
@@ -26,7 +31,7 @@ pub struct Config{
     pub file_cache_capacity:usize
 }
 
-#[derive(Debug,Clone,Default)]
+#[derive(Debug,Clone,Default,PartialEq,Deserialize,Serialize)]
 pub enum  SyncStrategy {
     // 每次写入数据立马同步到磁盘
     Always,
@@ -72,14 +77,14 @@ impl ConfigBuilder {
         Ok(())
     }
 
-    fn build(self)-> Result<Config>{
+    pub fn build(self)-> Result<Config>{
         self.valiate()?;
         Ok(self.inner)
     }
 }
 
 impl Config {
-    fn builder<P: Into<PathBuf>>(storage_path:P)->ConfigBuilder{
+    pub fn builder<P: Into<PathBuf>>(storage_path:P)->ConfigBuilder{
         ConfigBuilder{
             inner:Config{
                 storage_path:storage_path.into(),
@@ -91,8 +96,12 @@ impl Config {
 
 #[cfg(test)]
 mod test{
-    use crate::config::{self, config::Config};
+    use crate::cfg::{config::{Config, SyncStrategy}};
     use crate::db_error::Result;
+    use std::path::PathBuf;
+
+    /// 单元测试：
+    /// 测试配置模块的构建方法
     #[test]
     fn build_test()->Result<()>{
         let config = Config::builder("./db")
@@ -100,6 +109,10 @@ mod test{
         .file_cache_capacity(32)
         .build()?;
         println!("{:?}",config);
+        assert_eq!(config.storage_path, PathBuf::from("./db"));
+        assert_eq!(config.sync_strategy, SyncStrategy::Never);
+        assert_eq!(config.file_cache_capacity, 32);
+        assert_eq!(config.compaction_threshold, 0.6);
         Ok(())
     }
 }

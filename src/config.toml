@@ -1,1 +1,8 @@
-# 配置文件
+[config]
+storage_path = "./db"
+single_file_limit = 1
+sync_strategy = "Never"
+fsync_inteval_ms = 1000
+compaction_threshold = 0.6
+file_cache_capacity = 32
+

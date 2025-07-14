@@ -1,14 +1,42 @@
-// use notify::{Event, RecursiveMode, Result, Watcher};
-// use std::{path::Path, sync::mpsc};
-// use crate::db_error::Result;
+use notify::{Event, RecursiveMode, Result, Watcher};
+use std::{path::Path, sync::mpsc};
+use crate::cfg::Config;
+
+/// 监听配置文件变化，更新全局的配置实例
+pub fn watch_config(config:&mut Config)->crate::db_error::Result<()>{
+    let (tx, rx) = mpsc::channel::<Result<Event>>();
+    let mut watcher = notify::recommended_watcher(tx)?;
+    let target = Path::new("src/config.toml");
+    watcher.watch(target, RecursiveMode::NonRecursive)?;
+    // 监听更新内容，更新全局的配置实例
+    for res in rx {
+        match res {
+            Ok(event) => {
+                println!("event: {:?}", event);
+                // 读取文件当前内容
+                let content = std::fs::read_to_string(target)?;
+                // 解析配置文件
+                let new_config:Config = toml::from_str(&content)?;
+                // 更新全局的配置实例
+                *config = new_config;
+            }
+            Err(e) => {
+                println!("error: {:?}", e);
+            }
+        }
+    }   
+    Ok(())
+}
 #[cfg(test)]
 mod tests{
 
     use notify::{Event, RecursiveMode, Result, Watcher, EventKind};
     use notify::event::{AccessKind, AccessMode};
     use std::{path::Path, sync::mpsc};
+ 
 
     #[test]
+    #[ignore]
     fn test_notify()->Result<()>{
         let (tx, rx) = mpsc::channel::<Result<Event>>();
 

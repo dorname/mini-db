@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+
+use crate::cfg::Config;
 /// 自定义错误信息
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Error {
@@ -15,7 +17,11 @@ pub enum Error {
     /// 串行事务冲突：由不同writer，必须进行重试
     Serialization,
     //配置错误
-    ConfigError,
+    ConfigError(String),
+    /// 配置监听错误
+    ConfigWatcherError(String),
+    /// Mutex 锁错误
+    MutexError(String),
 }
 
 /// 自定义错误类型
@@ -34,7 +40,9 @@ impl std::fmt::Display for Error {
             Error::ParserError(msg) => write!(f, "parser error:{msg}"),
             Error::ReadOnly => write!(f, "error: readonly"),
             Error::Serialization => write!(f, "error: Serialization"),
-            Error::ConfigError => write!(f,"error: config error"),
+            Error::ConfigError(msg) => write!(f,"error: config error:{msg}"),
+            Error::ConfigWatcherError(msg) => write!(f,"error: config watcher error:{msg}"),
+            Error::MutexError(msg) => write!(f,"error: mutex error:{msg}"),
         }
     }
 }
@@ -52,6 +60,24 @@ impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         // 根据你的错误定义转换，比如包裹成一个枚举成员或自定义错误
         Error::IO(err.to_string())
+    }
+}
+
+impl From<toml::de::Error> for Error {
+    fn from(err: toml::de::Error) -> Self {
+        Error::ConfigError(err.to_string())
+    }
+}
+
+impl From<notify::Error> for Error {
+    fn from(err: notify::Error) -> Self {
+        Error::ConfigWatcherError(err.to_string())
+    }
+}
+
+impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, Config>>> for Error {
+    fn from(err: std::sync::PoisonError<std::sync::MutexGuard<'_, Config>>) -> Self {
+        Error::MutexError(err.to_string())
     }
 }
 
