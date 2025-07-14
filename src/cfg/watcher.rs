@@ -1,6 +1,6 @@
 use notify::{Event, RecursiveMode, Result, Watcher};
 use std::{path::Path, sync::mpsc};
-use crate::cfg::Config;
+use crate::cfg::{Config, load_config};
 
 /// 监听配置文件变化，更新全局的配置实例
 pub fn watch_config(config:&mut Config)->crate::db_error::Result<()>{
@@ -13,10 +13,8 @@ pub fn watch_config(config:&mut Config)->crate::db_error::Result<()>{
         match res {
             Ok(event) => {
                 println!("event: {:?}", event);
-                // 读取文件当前内容
-                let content = std::fs::read_to_string(target)?;
                 // 解析配置文件
-                let new_config:Config = toml::from_str(&content)?;
+                let new_config:Config = load_config()?;
                 // 更新全局的配置实例
                 *config = new_config;
             }
