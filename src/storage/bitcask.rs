@@ -1,24 +1,21 @@
 use crate::db_error::{Result};
 use crate::storage::engine::{Engine, EngineStatus};
+use crate::cfg::{get_db_base, get_max_size, load_config, watch_config, Config};
+use crate::init_tracing;
+
 use fs4::fs_std::FileExt;
 use sha3::{Digest, Sha3_256};
-use std::fs;
-use std::fs::{read_dir, File};
+use std::fs::{self, read_dir, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::vec;
+use tokio::sync::broadcast;
+use tokio::time;
 use tsid::create_tsid;
 use lazy_static::lazy_static;
-use crate::cfg::{load_config, Config};
 
-// 全局配置
-lazy_static!{
-    static ref CONFIG: Mutex<Config> = Mutex::new(load_config().unwrap());
-    static ref DB_BASE: String = CONFIG.lock().unwrap().storage_path.to_str().unwrap().to_string();
-    static ref MAX_SIZE: u64 = CONFIG.lock().unwrap().single_file_limit * 1024 * 1024 * 1024;
-}
 
 /// 实现一个BitCask结构
 /// struct - BitCask
@@ -30,12 +27,15 @@ pub struct BitCask {
     log: Option<Log>,
     keydir: KeyDir,
 }
+
+
 impl BitCask {
     /// 1、扫描数据库所有的存储文件
     /// 2、构建全局KeyDir——索引
     /// 3、打开活跃的存储文件
     fn init_db() -> Result<Self> {
-        let path = Path::new(DB_BASE.as_str());
+        let db_base = get_db_base();
+        let path = Path::new(db_base.as_str());
         let mut log_file_id = create_tsid().number().to_string() + "_active";
         let mut db = Self {
             log: None,
@@ -144,12 +144,13 @@ impl BitCask {
 
     /// 更新存储文件
     fn refresh_active(&mut self) {
+        let db_base = get_db_base();
         //1、将当前活跃文件设置为非活跃文件
         let file_id = self.log.as_mut().unwrap().file_id.clone();
         fs::rename(
-            Path::new(&(DB_BASE.to_owned() + file_id.as_str())),
+            Path::new(&(db_base.clone() + file_id.as_str())),
             Path::new(
-                &(DB_BASE.to_owned()
+                &(db_base.clone()
                     + file_id
                         .as_str()
                         .strip_suffix("_active")
@@ -165,7 +166,7 @@ impl BitCask {
 
     /// 判断活跃文件是否超过了限制大小
     fn check_size_limit(file: &std::fs::File) -> bool {
-        file.metadata().unwrap().len() >= *MAX_SIZE
+        file.metadata().unwrap().len() >= get_max_size()
     }
 
     // 判断Key是在活跃文件还是在非活跃文件
@@ -289,6 +290,7 @@ impl Engine for BitCask {
     }
 
     fn status(&mut self) -> Result<EngineStatus> {
+        let db_base = get_db_base();
         //1、获取所有key
         let keys = self.keydir.keys().cloned().collect::<Vec<_>>();
         // 获取所有存活的key
@@ -319,7 +321,7 @@ impl Engine for BitCask {
             })
             .sum::<usize>() as u64;
         //3、计算所有数据的磁盘总占用空间
-        let path = Path::new(DB_BASE.as_str());
+        let path = Path::new(db_base.as_str());
         let mut total_disk_size = 0;
         let mut live_disk_size = 0;
         if path.is_dir() {
@@ -549,7 +551,8 @@ impl Log {
     /// 创建一个新的日志存储文件
     /// 或者打开一个活跃存储文件
     fn new(file_id: String) -> Result<Self> {
-        let path = PathBuf::from(DB_BASE.to_string() + file_id.as_str());
+        let db_base = get_db_base();
+        let path = PathBuf::from(db_base.clone() + file_id.as_str());
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?
         }
@@ -655,8 +658,10 @@ impl Log {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::read_dir;
-
+    use std::{fs::read_dir, time::Duration};
+    use crate::{cfg::watch_config, init_tracing};
+    use tokio::{sync::broadcast, time};
+    use tracing::info;
     use super::*;
     use sha3::{Digest, Sha3_256};
 
@@ -703,7 +708,8 @@ mod tests {
     fn test_wr_log() {
         // 创建一个活跃文件
         let file_id = create_tsid().number().to_string() + "_active";
-        let temp_path = DB_BASE.to_string() + file_id.as_str();
+        let db_base = get_db_base();
+        let temp_path = db_base.clone() + file_id.as_str();
         println!("{:?}", temp_path);
         let mut log_db = Log::new(file_id).unwrap();
         let tstamp = crate::utils::get_timestamp_to_vec();
@@ -760,7 +766,8 @@ mod tests {
     #[test]
     #[ignore]
     fn test_files_iter() {
-        let path = Path::new(DB_BASE.as_str());
+        let db_base = get_db_base();
+        let path = Path::new(db_base.as_str());
         // 1、遍历文件目录
         if path.is_dir() {
             for file_entry in read_dir(path).unwrap() {
@@ -784,10 +791,11 @@ mod tests {
     #[test]
     fn test_get() {
         // 清理测试数据
-        let path = Path::new(DB_BASE.as_str());
+        let db_base = get_db_base();
+        let path = Path::new(db_base.as_str());
 
         let mut db = BitCask::init_db().unwrap();
-
+        
         // 写入测试数据
         let key = "key_4".as_bytes().to_vec();
         let value = "test";
@@ -853,5 +861,25 @@ mod tests {
         db.delete(10u32.to_be_bytes().to_vec());
         // db.flush().unwrap();
         println!("{:?}", db.status().unwrap());
+    }
+    //   // 启动另一个非阻塞线程打印配置
+    //   tokio::spawn(async move {
+    //     loop{
+    //         info!("{:?}", CONFIG.lock().unwrap());
+    //         time::sleep(Duration::from_secs(1)).await;
+    //     }
+    // });
+ 
+    use crate::cfg::CONFIG;
+    #[tokio::test]
+    async fn test_init_db_async(){
+        init_tracing();
+        let db = BitCask::init_db().unwrap();
+        watch_config(broadcast::channel(10).1).await;
+        info!("{:?}", db);
+        loop{
+            info!("{:?}", CONFIG.lock().unwrap());
+            time::sleep(Duration::from_secs(1)).await;
+        }
     }
 }

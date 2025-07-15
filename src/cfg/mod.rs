@@ -1,22 +1,26 @@
 mod config;
 mod watcher;
 
-use crate::db_error::Result;
-use std::path::Path;
-use std::path::PathBuf;
-pub use config::{Config, ConfigWrapper};
+pub use config::Config;
+pub use watcher::watch_config;
 
-pub fn load_config()->Result<Config>{
-    let path = Path::new("./src/config.toml");
-    // 1、读取配置文件
-    let content = std::fs::read_to_string(path)?;
-    // 2、解析配置文件
-    let wrapper:ConfigWrapper = toml::from_str(&content)?;
-    // 3、返回实际的配置
-    Ok(wrapper.config)
- }
-// TODO 需要增加一个机制
-// pub fn watch_config(config:&mut Config)->Result<()>{
-//     watcher::watch_config(config)?;
-//     Ok(())
-// }
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+
+lazy_static! {
+    pub static ref CONFIG: Mutex<Config> = Mutex::new(Config::load_config().unwrap());
+}
+
+pub fn load_config() -> crate::db_error::Result<Config> {
+    Config::load_config()
+}
+
+pub fn get_db_base()->String{
+    let config = CONFIG.lock().unwrap();
+    config.storage_path.to_str().unwrap().to_string()
+}
+
+pub fn get_max_size()->u64{
+    let config = CONFIG.lock().unwrap();
+    config.single_file_limit * 1024 * 1024 * 1024
+}
