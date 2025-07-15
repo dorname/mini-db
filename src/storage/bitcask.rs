@@ -1,9 +1,10 @@
-use crate::db_error::{Result};
-use crate::storage::engine::{Engine, EngineStatus};
 use crate::cfg::{get_db_base, get_max_size, load_config, watch_config, Config};
+use crate::db_error::Result;
 use crate::init_tracing;
+use crate::storage::engine::{Engine, EngineStatus};
 
 use fs4::fs_std::FileExt;
+use lazy_static::lazy_static;
 use sha3::{Digest, Sha3_256};
 use std::fs::{self, read_dir, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -14,8 +15,6 @@ use std::vec;
 use tokio::sync::broadcast;
 use tokio::time;
 use tsid::create_tsid;
-use lazy_static::lazy_static;
-
 
 /// 实现一个BitCask结构
 /// struct - BitCask
@@ -27,7 +26,6 @@ pub struct BitCask {
     log: Option<Log>,
     keydir: KeyDir,
 }
-
 
 impl BitCask {
     /// 1、扫描数据库所有的存储文件
@@ -48,7 +46,7 @@ impl BitCask {
                 .into_iter()
                 .map(|e| e.unwrap().path())
                 .collect::<Vec<_>>();
-            //2、根据时间大小排序 创建时间越晚文件名的数值越大 
+            //2、根据时间大小排序 创建时间越晚文件名的数值越大
             //活跃文件的文件名永远是最大的
             if !paths.is_empty() {
                 paths.sort_by(|file_a, file_b| {
@@ -193,12 +191,27 @@ impl BitCask {
             }
         };
     }
+
     /// compact方法
     /// 压缩活跃日志文件：
-    /// 1、创建新的日志文件，将所有活跃的键写入新的日志文件
-    /// 2、删除旧的日志文件
-    fn compact(){
-        
+    /// 1、创建新的活跃日志文件，将所有活跃的键写入新的日志文件
+    /// 2、删除旧的活跃日志文件
+    fn compact(&mut self) -> crate::db_error::Result<()> {
+        let db_base = get_db_base();
+         // 3、根据旧文件名删除旧的活跃日志文件
+         let old_file_id = self.log.as_ref().unwrap().file_id.clone();
+        // 1、创建新的活跃日志文件
+        let new_log = Log::new(create_tsid().number().to_string() + "_active")?;
+        self.log = Some(new_log);
+        // 2、将所有活跃的键写入新的日志文件
+        let keydir = self.keydir.clone();
+        for (key, val_tuple) in keydir.iter() {
+            let value = self.get(key.clone())?;
+            self.set(key.clone(), &value.unwrap().as_str())?;
+        }
+        self.flush()?;
+        fs::remove_file(Path::new(&(db_base.clone() + old_file_id.as_str())))?;
+        Ok(())
     }
 }
 
@@ -228,7 +241,7 @@ impl Engine for BitCask {
     }
     /// 读取条目数据
     /// 根据keyDir取获取
-    fn get(&mut self, key: Vec<u8>) -> Result<Option<String>> {
+    fn get(&self, key: Vec<u8>) -> Result<Option<String>> {
         // 1、根据key,从keydir中读相关的存储信息
         // KeyDir：key ——— (fileId、crc_pos）
         if let Some((_, crc_pos)) = self.keydir.get(&key) {
@@ -270,12 +283,14 @@ impl Engine for BitCask {
         }
         Ok(())
     }
-
     fn scan(&self, range: impl std::ops::RangeBounds<Vec<u8>>) -> Result<Vec<(Vec<u8>, String)>> {
         Ok(self
             .keydir
             .range(range)
-            .map(|(key, value)| (key.clone(), value.0.clone()))
+            .map(|(key, _)| {
+                let value = self.get(key.clone()).unwrap();
+                (key.clone(), value.unwrap())
+            })
             .collect::<Vec<(Vec<u8>, String)>>())
     }
 
@@ -339,20 +354,22 @@ impl Engine for BitCask {
                 .filter_map(|entry| entry.path().metadata().ok())
                 .map(|metadata| metadata.len())
                 .sum();
-            //4、计算活跃数据的磁盘存储空间
-            live_disk_size = live_keys
-                .iter()
-                .map(|&key| {
-                    let log = self.get_log_by_key(key.clone()).unwrap();
-                    match log {
-                        Some(mut log) => {
-                            let value = self.keydir.get(&key.clone()).unwrap();
-                            log.read_entry(value.1).unwrap().unwrap().get_entry().len()
+            if total_disk_size > 0 {
+                //4、计算活跃数据的磁盘存储空间
+                live_disk_size = live_keys
+                    .iter()
+                    .map(|&key| {
+                        let log = self.get_log_by_key(key.clone()).unwrap();
+                        match log {
+                            Some(mut log) => {
+                                let value = self.keydir.get(&key.clone()).unwrap();
+                                log.read_entry(value.1).unwrap().unwrap().get_entry().len()
+                            }
+                            None => 0,
                         }
-                        None => 0,
-                    }
-                })
-                .sum::<usize>() as u64;
+                    })
+                    .sum::<usize>() as u64;
+            }
         }
         let garbage_disk_size = total_disk_size - live_disk_size;
 
@@ -658,12 +675,12 @@ impl Log {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::read_dir, time::Duration};
+    use super::*;
     use crate::{cfg::watch_config, init_tracing};
+    use sha3::{Digest, Sha3_256};
+    use std::{fs::read_dir, time::Duration};
     use tokio::{sync::broadcast, time};
     use tracing::info;
-    use super::*;
-    use sha3::{Digest, Sha3_256};
 
     #[test]
     fn sha3_test() {
@@ -672,8 +689,10 @@ mod tests {
         h.update("abc".as_bytes());
         let result = h.finalize();
         assert_eq!(result.to_vec().len(), 32);
-        assert_eq!(hex::encode(result.to_vec()),
-         "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532");
+        assert_eq!(
+            hex::encode(result.to_vec()),
+            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"
+        );
     }
 
     #[test]
@@ -721,7 +740,7 @@ mod tests {
         // 读取数据
         let log_entry = log_db.read_entry(0u32).unwrap().unwrap();
         println!("{:?}", log_entry);
-        assert_eq!("test-3333",String::from_utf8_lossy(&log_entry.value));
+        assert_eq!("test-3333", String::from_utf8_lossy(&log_entry.value));
         // 删除测试文件
         std::fs::remove_file(temp_path).unwrap();
     }
@@ -795,7 +814,7 @@ mod tests {
         let path = Path::new(db_base.as_str());
 
         let mut db = BitCask::init_db().unwrap();
-        
+
         // 写入测试数据
         let key = "key_4".as_bytes().to_vec();
         let value = "test";
@@ -843,7 +862,10 @@ mod tests {
         let mut db = BitCask::init_db().unwrap();
         // db.set(10u32.to_be_bytes().to_vec(), "");
         db.set("key_1".as_bytes().to_vec(), "value_1");
-        assert_eq!(db.get("key_1".as_bytes().to_vec()).unwrap().unwrap(), "value_1");
+        assert_eq!(
+            db.get("key_1".as_bytes().to_vec()).unwrap().unwrap(),
+            "value_1"
+        );
     }
 
     #[test]
@@ -862,17 +884,27 @@ mod tests {
         // db.flush().unwrap();
         println!("{:?}", db.status().unwrap());
     }
- 
+
     use crate::cfg::CONFIG;
     #[tokio::test]
-    async fn test_init_db_async(){
+    async fn test_init_db_async() {
         init_tracing();
         let db = BitCask::init_db().unwrap();
         watch_config(broadcast::channel(10).1).await;
         info!("{:?}", db);
-        loop{
+        loop {
             info!("{:?}", CONFIG.lock().unwrap());
             time::sleep(Duration::from_secs(1)).await;
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_compact() {
+        let mut db = BitCask::init_db().unwrap();
+        println!("{:?}", db.status().unwrap());
+        // println!("{:?}", db.get("key_4".as_bytes().to_vec()).unwrap());
+        db.compact().unwrap();
+        println!("{:?}", db.status().unwrap());
     }
 }

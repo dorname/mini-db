@@ -6,7 +6,7 @@ pub trait Engine: Send {
     fn set(&mut self, key: Vec<u8>, value: &str) -> Result<()>;
 
     // 为特定键值Key,获取一个值Value+
-    fn get(&mut self, key: Vec<u8>) -> Result<Option<String>>;
+    fn get(&self, key: Vec<u8>) -> Result<Option<String>>;
 
     // 删除一个键值Key
     fn delete(&mut self, key: Vec<u8>) -> Result<()>;
