@@ -1,8 +1,16 @@
+use std::env;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{db_error::Result};
+
+pub fn get_config_path() -> PathBuf {
+    let exe_path = env::current_exe().unwrap();
+    let exe_dir = exe_path.parent().unwrap();
+    let project_root = exe_dir.parent().unwrap().parent().unwrap();
+    project_root.join("F:\\project\\rust_base_learning\\mini-db\\config.toml")
+}
 
 #[derive(Debug,Default,Deserialize,Serialize)]
 pub struct ConfigWrapper {
@@ -94,7 +102,7 @@ impl Config {
     }
 
     pub fn load_config() -> Result<Config> {
-        let path = PathBuf::from("./src/config.toml");
+        let path = get_config_path();
         // 1、读取配置文件
         let content = std::fs::read_to_string(path)?;
         // 2、解析配置文件
@@ -123,6 +131,15 @@ mod test{
         assert_eq!(config.sync_strategy, SyncStrategy::Never);
         assert_eq!(config.file_cache_capacity, 32);
         assert_eq!(config.compaction_threshold, 0.6);
+        Ok(())
+    }
+
+    /// 单元测试：
+    /// 测试配置模块的加载方法
+    #[test]
+    fn load_test()->Result<()>{
+        let config = Config::load_config()?;
+        println!("{:?}",config);
         Ok(())
     }
 }

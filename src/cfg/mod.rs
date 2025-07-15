@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 use std::sync::Mutex;
 
 lazy_static! {
-    pub static ref CONFIG: Mutex<Config> = Mutex::new(Config::load_config().unwrap());
+    pub static ref CONFIG: Mutex<Config> = Mutex::new(load_config().unwrap());
 }
 
 pub fn load_config() -> crate::db_error::Result<Config> {

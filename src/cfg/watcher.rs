@@ -1,15 +1,16 @@
-use crate::cfg::{load_config, watcher, Config};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Result, Watcher};
-use std::{path::{self, Path},sync::{Arc, Mutex}};
+use crate::cfg::{load_config};
+use notify::{Event, RecursiveMode, Result, Watcher};
+use std::path::Path;
 use tokio::{sync::{mpsc,broadcast},task};
 use tracing::{info, error};
+use super::config::get_config_path;
 
 /// 监听配置文件变化，更新全局的配置实例
 pub async fn watch_config(mut shutdown: broadcast::Receiver<()>) {
     // 启动后台异步任务，不阻塞主线程
     tokio::spawn(async move {
         let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event>>();
-        let path = Path::new("src/config.toml");
+        let path = get_config_path();
 
         // 在阻塞线程中运行 watcher
         let _watcher_handle = task::spawn_blocking({
@@ -18,7 +19,7 @@ pub async fn watch_config(mut shutdown: broadcast::Receiver<()>) {
                 let mut watcher = notify::recommended_watcher(move |res| {
                     let _ = tx.send(res);
                 })?;
-                watcher.watch(path, RecursiveMode::NonRecursive)?;
+                watcher.watch(&path, RecursiveMode::NonRecursive)?;
 
                 // 阻塞保持线程运行
                 loop {

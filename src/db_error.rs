@@ -22,6 +22,8 @@ pub enum Error {
     ConfigWatcherError(String),
     /// Mutex 锁错误
     MutexError(String),
+    /// 服务器错误
+    ServerError(String),
 }
 
 /// 自定义错误类型
@@ -43,6 +45,7 @@ impl std::fmt::Display for Error {
             Error::ConfigError(msg) => write!(f,"error: config error:{msg}"),
             Error::ConfigWatcherError(msg) => write!(f,"error: config watcher error:{msg}"),
             Error::MutexError(msg) => write!(f,"error: mutex error:{msg}"),
+            Error::ServerError(msg) => write!(f,"error: server error:{msg}"),
         }
     }
 }
@@ -78,6 +81,12 @@ impl From<notify::Error> for Error {
 impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, Config>>> for Error {
     fn from(err: std::sync::PoisonError<std::sync::MutexGuard<'_, Config>>) -> Self {
         Error::MutexError(err.to_string())
+    }
+}
+
+impl From<axum::Error> for Error {
+    fn from(err: axum::Error) -> Self {
+        Error::ServerError(err.to_string())
     }
 }
 

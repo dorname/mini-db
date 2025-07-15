@@ -33,7 +33,7 @@ impl BitCask {
     /// 1、扫描数据库所有的存储文件
     /// 2、构建全局KeyDir——索引
     /// 3、打开活跃的存储文件
-    fn init_db() -> Result<Self> {
+    pub fn init_db() -> Result<Self> {
         let db_base = get_db_base();
         let path = Path::new(db_base.as_str());
         let mut log_file_id = create_tsid().number().to_string() + "_active";
@@ -862,13 +862,6 @@ mod tests {
         // db.flush().unwrap();
         println!("{:?}", db.status().unwrap());
     }
-    //   // 启动另一个非阻塞线程打印配置
-    //   tokio::spawn(async move {
-    //     loop{
-    //         info!("{:?}", CONFIG.lock().unwrap());
-    //         time::sleep(Duration::from_secs(1)).await;
-    //     }
-    // });
  
     use crate::cfg::CONFIG;
     #[tokio::test]

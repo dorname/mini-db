@@ -1,5 +1,5 @@
 [config]
-storage_path = "./db"
+storage_path = "./db/"
 single_file_limit = 1
 sync_strategy = "Never"
 fsync_inteval_ms = 1000
