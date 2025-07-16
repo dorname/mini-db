@@ -9,7 +9,7 @@ pub fn get_config_path() -> PathBuf {
     let exe_path = env::current_exe().unwrap();
     let exe_dir = exe_path.parent().unwrap();
     let project_root = exe_dir.parent().unwrap().parent().unwrap();
-    project_root.join("F:\\project\\rust_base_learning\\mini-db\\config.toml")
+    project_root.join("/project/rust_base_learning/mini-db/config.toml")
 }
 
 #[derive(Debug,Default,Deserialize,Serialize)]

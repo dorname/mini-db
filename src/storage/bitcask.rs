@@ -1,19 +1,15 @@
-use crate::cfg::{get_db_base, get_max_size, load_config, watch_config, Config};
+use crate::cfg::{get_db_base, get_max_size};
 use crate::db_error::Result;
-use crate::init_tracing;
 use crate::storage::engine::{Engine, EngineStatus};
 
 use fs4::fs_std::FileExt;
-use lazy_static::lazy_static;
 use sha3::{Digest, Sha3_256};
-use std::fs::{self, read_dir, File};
+use std::fs::{self, read_dir};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::vec;
-use tokio::sync::broadcast;
-use tokio::time;
+use tracing::info;
 use tsid::create_tsid;
 
 /// 实现一个BitCask结构
@@ -74,7 +70,11 @@ impl BitCask {
                             .unwrap()
                             .to_string();
                     }
-                    db.build_key_dir(file_path);
+                    // 由于for_each闭包不能使用?操作符，这里改用for循环
+                    if let Err(e) = db.build_key_dir(file_path) {
+                        // 可以根据需要选择panic、返回Err或打印错误，这里选择panic
+                        panic!("构建KeyDir失败: {:?}", e);
+                    }
                 });
             }
         }
@@ -129,7 +129,7 @@ impl BitCask {
                 Ok((key, file_id, Some(crc_pos))) => {
                     self.keydir.insert(key, (file_id, crc_pos));
                 }
-                Ok((key, file_id, None)) => {
+                Ok((key, _, None)) => {
                     self.keydir.remove(&key);
                 }
                 Err(_) => {
@@ -175,7 +175,10 @@ impl BitCask {
             .keydir
             .get(&key)
             .map(|(file_id, _)| file_id.clone())
-            .unwrap();
+            .unwrap_or("".to_owned());
+        if file_id.eq("") {
+            return Ok(None);
+        }
         let active = &self.log;
         match active {
             None => {
@@ -198,16 +201,22 @@ impl BitCask {
     /// 2、删除旧的活跃日志文件
     fn compact(&mut self) -> crate::db_error::Result<()> {
         let db_base = get_db_base();
-         // 3、根据旧文件名删除旧的活跃日志文件
-         let old_file_id = self.log.as_ref().unwrap().file_id.clone();
+        // 3、根据旧文件名删除旧的活跃日志文件
+        let old_file_id = self.log.as_ref().unwrap().file_id.clone();
         // 1、创建新的活跃日志文件
         let new_log = Log::new(create_tsid().number().to_string() + "_active")?;
         self.log = Some(new_log);
+        fn write(log: &mut Log, key: Vec<u8>, value: &str) -> Result<u64> {
+            let tstamp = crate::utils::get_timestamp_to_vec();
+            let mut log_entry = LogEntry::new(tstamp, key.clone(), value.as_bytes().to_vec());
+            log_entry.build_crc(); // 构建crc校验字段
+            log.write_entry(log_entry)
+        }
         // 2、将所有活跃的键写入新的日志文件
         let keydir = self.keydir.clone();
-        for (key, val_tuple) in keydir.iter() {
+        for (key, _) in keydir.iter() {
             let value = self.get(key.clone())?;
-            self.set(key.clone(), &value.unwrap().as_str())?;
+            write(self.log.as_mut().unwrap(), key.clone(), &value.unwrap().as_str())?;
         }
         self.flush()?;
         fs::remove_file(Path::new(&(db_base.clone() + old_file_id.as_str())))?;
@@ -218,21 +227,45 @@ impl BitCask {
 impl Engine for BitCask {
     /// 写入条目数据
     fn set(&mut self, key: Vec<u8>, value: &str) -> Result<()> {
-        // 1、检查活跃文件是否超过限制大小
-        if let Some(log) = &mut self.log {
-            if BitCask::check_size_limit(&log.file.lock().unwrap()) {
-                // 2、更新活跃文件
-                self.refresh_active();
-            }
-        }
-
-        // 3、写入数据
-        if let Some(log) = &mut self.log {
+        // 0、获取当前key所在的文件
+        let mut belong_log = self.get_log_by_key(key.clone())?;
+        let current_file_id = self.log.clone().unwrap().file_id;
+        fn write(log: &mut Log, key: Vec<u8>, value: &str) -> Result<u64> {
             let tstamp = crate::utils::get_timestamp_to_vec();
             let mut log_entry = LogEntry::new(tstamp, key.clone(), value.as_bytes().to_vec());
             log_entry.build_crc(); // 构建crc校验字段
-            let crc_pos = log.write_entry(log_entry)?;
-            println!("写入文件位置:{:?}", crc_pos);
+            log.write_entry(log_entry)
+        }
+        if let Some(log) = &mut belong_log {
+            // 键值已经存在,写入数据
+            let crc_pos = write(log, key.clone(), value)?;
+            info!("写入文件位置:{:?}", crc_pos);
+            // 4、更新索引
+            self.keydir
+                .insert(key, (log.file_id.clone(), crc_pos as u32));
+        } else {
+            {
+                let log = self.log.as_ref().unwrap();
+                let need_compact = log.file_id == current_file_id
+                    && BitCask::check_size_limit(&log.file.lock().unwrap());
+                info!("需要压缩:{:?}", need_compact);
+                if need_compact {
+                    self.compact()?;
+                }
+            }
+            {
+                let log = self.log.as_ref().unwrap();
+                let need_refresh = log.file_id == current_file_id
+                    && BitCask::check_size_limit(&log.file.lock().unwrap());
+                info!("需要写入到新的活跃文件:{:?}", need_refresh);
+                if need_refresh {
+                    self.refresh_active();
+                }
+            }
+
+            let log = self.log.as_mut().unwrap();
+            let crc_pos = write(log, key.clone(), value)?;
+            info!("写入文件位置:{:?}", crc_pos);
             // 4、更新索引
             self.keydir
                 .insert(key, (log.file_id.clone(), crc_pos as u32));
