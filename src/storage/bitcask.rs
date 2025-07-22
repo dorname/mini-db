@@ -215,7 +215,7 @@ impl BitCask {
         // 2、将所有活跃的键写入新的日志文件
         let keydir = self.keydir.clone();
         for (key, _) in keydir.iter() {
-            let value = self.get(key.clone())?;
+            let value = self.get(key)?;
             write(self.log.as_mut().unwrap(), key.clone(), &value.unwrap().as_str())?;
         }
         self.flush()?;
@@ -226,23 +226,23 @@ impl BitCask {
 
 impl Engine for BitCask {
     /// 写入条目数据
-    fn set(&mut self, key: Vec<u8>, value: &str) -> Result<()> {
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         // 0、获取当前key所在的文件
-        let mut belong_log = self.get_log_by_key(key.clone())?;
+        let mut belong_log = self.get_log_by_key(key.to_vec())?;
         let current_file_id = self.log.clone().unwrap().file_id;
-        fn write(log: &mut Log, key: Vec<u8>, value: &str) -> Result<u64> {
+        fn write(log: &mut Log, key: &[u8], value: &[u8]) -> Result<u64> {
             let tstamp = crate::utils::get_timestamp_to_vec();
-            let mut log_entry = LogEntry::new(tstamp, key.clone(), value.as_bytes().to_vec());
+            let mut log_entry = LogEntry::new(tstamp, key.to_vec(), value.to_vec());
             log_entry.build_crc(); // 构建crc校验字段
             log.write_entry(log_entry)
         }
         if let Some(log) = &mut belong_log {
             // 键值已经存在,写入数据
-            let crc_pos = write(log, key.clone(), value)?;
+            let crc_pos = write(log, key, value)?;
             info!("写入文件位置:{:?}", crc_pos);
             // 4、更新索引
             self.keydir
-                .insert(key, (log.file_id.clone(), crc_pos as u32));
+                .insert(key.to_vec(), (log.file_id.clone(), crc_pos as u32));
         } else {
             {
                 let log = self.log.as_ref().unwrap();
@@ -264,21 +264,21 @@ impl Engine for BitCask {
             }
 
             let log = self.log.as_mut().unwrap();
-            let crc_pos = write(log, key.clone(), value)?;
+            let crc_pos = write(log, key, value)?;
             info!("写入文件位置:{:?}", crc_pos);
             // 4、更新索引
             self.keydir
-                .insert(key, (log.file_id.clone(), crc_pos as u32));
+                .insert(key.to_vec(), (log.file_id.clone(), crc_pos as u32));
         }
         Ok(())
     }
     /// 读取条目数据
     /// 根据keyDir取获取
-    fn get(&self, key: Vec<u8>) -> Result<Option<String>> {
+    fn get(&self, key: &[u8]) -> Result<Option<String>> {
         // 1、根据key,从keydir中读相关的存储信息
         // KeyDir：key ——— (fileId、crc_pos）
-        if let Some((_, crc_pos)) = self.keydir.get(&key) {
-            let log = self.get_log_by_key(key)?;
+        if let Some((_, crc_pos)) = self.keydir.get(key) {
+            let log = self.get_log_by_key(key.to_vec())?;
             match log {
                 Some(mut log) => {
                     println!("读取文件位置:{:?}", *crc_pos);
@@ -301,10 +301,10 @@ impl Engine for BitCask {
         }
     }
 
-    fn delete(&mut self, key: Vec<u8>) -> Result<()> {
-        self.set(key.clone(), "")?;
+    fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.set(&key, &[])?;
         self.flush()?;
-        self.keydir.remove(&key);
+        self.keydir.remove(key);
         Ok(())
     }
 
@@ -321,7 +321,7 @@ impl Engine for BitCask {
             .keydir
             .range(range)
             .map(|(key, _)| {
-                let value = self.get(key.clone()).unwrap();
+                let value = self.get(key).unwrap();
                 (key.clone(), value.unwrap())
             })
             .collect::<Vec<(Vec<u8>, String)>>())
@@ -332,7 +332,7 @@ impl Engine for BitCask {
         let keys = self.keydir.keys().cloned().collect::<Vec<_>>();
         //2、删除所有的key
         for key in keys {
-            self.delete(key)?;
+            self.delete(&key)?;
         }
         Ok(())
     }
@@ -410,9 +410,9 @@ impl Engine for BitCask {
             name: "bitcask".to_string(),
             logical_size: logical_size as u64,
             total_count: total_count as u64,
-            total_disk_size: total_disk_size as u64,
-            live_disk_size: live_disk_size as u64,
-            garbage_disk_size: garbage_disk_size as u64,
+            total_size: total_disk_size as u64,
+            live_size: live_disk_size as u64,
+            garbage_size: garbage_disk_size as u64,
         })
     }
 }
@@ -694,11 +694,11 @@ impl Log {
 
         if let Err(e) = file.read_exact(&mut entry) {
             eprintln!("读取条目时出错: {}", e);
-            return Err(e.into());
+            return Err(e.into());   
         }
         let log_entry = LogEntry::from_bytes(entry);
         // 4、检验完整性
-        if (self.check_crc(log_entry.crc.clone(), log_entry.get_entry()[8..].to_vec())) {
+        if self.check_crc(log_entry.crc.clone(), log_entry.get_entry()[8..].to_vec()) {
             return Ok(Some(log_entry));
         }
         file.rewind()?;
@@ -844,15 +844,13 @@ mod tests {
     fn test_get() {
         // 清理测试数据
         let db_base = get_db_base();
-        let path = Path::new(db_base.as_str());
-
         let mut db = BitCask::init_db().unwrap();
 
         // 写入测试数据
         let key = "key_4".as_bytes().to_vec();
-        let value = "test";
+        let value = "test".as_bytes().to_vec();
         // println!("开始写入数据");
-        db.set(key.clone(), value);
+        db.set(&key, &value);
         println!(
             "写入文件位置指针:{:?}",
             db.get_log_by_key(key.clone())
@@ -866,10 +864,10 @@ mod tests {
 
         // 读取测试数据
         println!("开始读取数据");
-        match db.get(key.clone()) {
+        match db.get(&key) {
             Ok(Some(val)) => {
                 println!("读取成功: {}", val);
-                assert_eq!(val, value);
+                assert_eq!(val, String::from_utf8_lossy(&value));
             }
             Ok(None) => {
                 panic!("未找到键: {:?}", String::from_utf8_lossy(&key));
@@ -894,9 +892,9 @@ mod tests {
     fn test_set() {
         let mut db = BitCask::init_db().unwrap();
         // db.set(10u32.to_be_bytes().to_vec(), "");
-        db.set("key_1".as_bytes().to_vec(), "value_1");
+        db.set(&"key_1".as_bytes().to_vec(), &"value_1".as_bytes().to_vec());
         assert_eq!(
-            db.get("key_1".as_bytes().to_vec()).unwrap().unwrap(),
+            db.get(&"key_1".as_bytes().to_vec()).unwrap().unwrap(),
             "value_1"
         );
     }
@@ -912,8 +910,8 @@ mod tests {
     #[ignore]
     fn test_status() {
         let mut db = BitCask::init_db().unwrap();
-        db.set(10u32.to_be_bytes().to_vec(), "value_5");
-        db.delete(10u32.to_be_bytes().to_vec());
+        // db.set(&10u32.to_be_bytes().to_vec(), &"value_5".as_bytes().to_vec());
+        // db.delete(&10u32.to_be_bytes().to_vec());
         // db.flush().unwrap();
         println!("{:?}", db.status().unwrap());
     }
