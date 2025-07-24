@@ -54,6 +54,7 @@ pub struct ConfigBuilder {
     pub inner:Config
 }
 
+#[allow(dead_code)]
 impl ConfigBuilder {
     fn storage_path(mut self,path:PathBuf)->Self{
         self.inner.storage_path = path;

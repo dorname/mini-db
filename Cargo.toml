@@ -3,6 +3,8 @@ name = "mini-db"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 fs4 = "0.13.1"
 hex = "0.4.3"
@@ -16,3 +18,5 @@ tsid = "0.3.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = "0.8.4"
+serde_bytes = "0.11.17"
+bincode = "2.0.1"

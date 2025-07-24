@@ -216,7 +216,11 @@ impl BitCask {
         let keydir = self.keydir.clone();
         for (key, _) in keydir.iter() {
             let value = self.get(key)?;
-            write(self.log.as_mut().unwrap(), key.clone(), &value.unwrap().as_str())?;
+            write(
+                self.log.as_mut().unwrap(),
+                key.clone(),
+                &value.unwrap().as_str(),
+            )?;
         }
         self.flush()?;
         fs::remove_file(Path::new(&(db_base.clone() + old_file_id.as_str())))?;
@@ -462,8 +466,10 @@ type ValTuple = (String, u32);
 #[derive(Debug, Clone)]
 struct Log {
     file_id: String,
+    #[allow(dead_code)]
     file_path: PathBuf,
     file: Arc<Mutex<std::fs::File>>, // 使用 Arc 和 Mutex 包装 File
+    #[allow(dead_code)]
     current_offset: u32,
 }
 
@@ -488,6 +494,7 @@ struct LogEntry {
     value: Vec<u8>,
 }
 
+#[allow(dead_code)]
 impl LogEntry {
     /// 初始化日志条目
     /// ```
@@ -694,7 +701,7 @@ impl Log {
 
         if let Err(e) = file.read_exact(&mut entry) {
             eprintln!("读取条目时出错: {}", e);
-            return Err(e.into());   
+            return Err(e.into());
         }
         let log_entry = LogEntry::from_bytes(entry);
         // 4、检验完整性
@@ -769,7 +776,7 @@ mod tests {
         let value = "test-3333".as_bytes().to_vec();
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
-        log_db.write_entry(log);
+        let _ = log_db.write_entry(log);
         // 读取数据
         let log_entry = log_db.read_entry(0u32).unwrap().unwrap();
         println!("{:?}", log_entry);
@@ -782,7 +789,7 @@ mod tests {
     #[ignore]
     fn test_read_log() {
         let file_id = "696392295149515530_active".to_string();
-        let mut log_db = Log::new(file_id).unwrap();
+        let log_db = Log::new(file_id).unwrap();
         let pos = 23 as u64;
         let mut buf = vec![0u8; 5];
         let mut file = log_db.file.lock().unwrap();
@@ -812,7 +819,7 @@ mod tests {
         let value = "value_1".as_bytes().to_vec();
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
-        log_db.write_entry(log);
+        let _ = log_db.write_entry(log);
     }
 
     #[test]
@@ -843,14 +850,13 @@ mod tests {
     #[test]
     fn test_get() {
         // 清理测试数据
-        let db_base = get_db_base();
         let mut db = BitCask::init_db().unwrap();
 
         // 写入测试数据
         let key = "key_4".as_bytes().to_vec();
         let value = "test".as_bytes().to_vec();
         // println!("开始写入数据");
-        db.set(&key, &value);
+        let _ = db.set(&key, &value);
         println!(
             "写入文件位置指针:{:?}",
             db.get_log_by_key(key.clone())
@@ -892,7 +898,7 @@ mod tests {
     fn test_set() {
         let mut db = BitCask::init_db().unwrap();
         // db.set(10u32.to_be_bytes().to_vec(), "");
-        db.set(&"key_1".as_bytes().to_vec(), &"value_1".as_bytes().to_vec());
+        let _ = db.set(&"key_1".as_bytes().to_vec(), &"value_1".as_bytes().to_vec());
         assert_eq!(
             db.get(&"key_1".as_bytes().to_vec()).unwrap().unwrap(),
             "value_1"

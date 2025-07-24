@@ -1,6 +1,5 @@
 use crate::cfg::{load_config};
 use notify::{Event, RecursiveMode, Result, Watcher};
-use std::path::Path;
 use tokio::{sync::{mpsc,broadcast},task};
 use tracing::{info, error};
 use super::config::get_config_path;
