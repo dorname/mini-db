@@ -1,9 +1,9 @@
 mod timestamp;
 pub use timestamp::*;
 
-mod decode;
-mod encode;
+mod bin_encoder;
+mod key_encoder;
 
 
-// pub use decode::*;
-pub use encode::*;
+pub use bin_encoder::*;
+pub use key_encoder::*;

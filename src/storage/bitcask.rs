@@ -944,4 +944,13 @@ mod tests {
         db.compact().unwrap();
         println!("{:?}", db.status().unwrap());
     }
+
+    #[test]
+    #[ignore]
+    fn test_scan()->Result<()>{
+        let  db = BitCask::init_db()?;
+
+        // db.scan(&(0..3))?;
+        Ok(())
+    }
 }

@@ -1,3 +1,6 @@
+
+use std::{f64::consts::E, fmt::{write, Display}};
+
 use serde::{Deserialize, Serialize};
 
 use crate::cfg::Config;
@@ -24,6 +27,14 @@ pub enum Error {
     MutexError(String),
     /// 服务器错误
     ServerError(String),
+    /// keycode/bincode 编码错误
+    EncodeError(String),
+    /// keycode/bincode 解码错误
+    DecodeError(String),
+    /// 序列化类型
+    SerializationError(String),
+    /// TryFromIntError
+    TryFromIntError(String)
 }
 
 /// 自定义错误类型
@@ -31,6 +42,47 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// 实现标准库std::error::Error特征
 impl std::error::Error for Error {}
+
+impl serde::ser::Error for Error {
+    #[doc = r" Used when a [`Serialize`] implementation encounters any error"]
+    #[doc = r" while serializing a type."]
+    #[doc = r""]
+    #[doc = r" The message should not be capitalized and should not end with a"]
+    #[doc = r" period."]
+    #[doc = r""]
+    #[doc = r" For example, a filesystem [`Path`] may refuse to serialize"]
+    #[doc = r" itself if it contains invalid UTF-8 data."]
+    #[doc = r""]
+    #[doc = r" ```edition2021"]
+    #[doc = r" # struct Path;"]
+    #[doc = r" #"]
+    #[doc = r" # impl Path {"]
+    #[doc = r" #     fn to_str(&self) -> Option<&str> {"]
+    #[doc = r" #         unimplemented!()"]
+    #[doc = r" #     }"]
+    #[doc = r" # }"]
+    #[doc = r" #"]
+    #[doc = r" use serde::ser::{self, Serialize, Serializer};"]
+    #[doc = r""]
+    #[doc = r" impl Serialize for Path {"]
+    #[doc = r"     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>"]
+    #[doc = r"     where"]
+    #[doc = r"         S: Serializer,"]
+    #[doc = r"     {"]
+    #[doc = r"         match self.to_str() {"]
+    #[doc = r"             Some(s) => serializer.serialize_str(s),"]
+    #[doc = r#"             None => Err(ser::Error::custom("path contains invalid UTF-8 characters")),"#]
+    #[doc = r"         }"]
+    #[doc = r"     }"]
+    #[doc = r" }"]
+    #[doc = r" ```"]
+    #[doc = r""]
+    #[doc = r" [`Path`]: std::path::Path"]
+    #[doc = r" [`Serialize`]: crate::Serialize"]
+    fn custom<T>(msg:T) -> Self where T:Display {
+        Self::SerializationError(msg.to_string())
+    }
+}
 
 /// 实现格式输出
 impl std::fmt::Display for Error {
@@ -46,6 +98,10 @@ impl std::fmt::Display for Error {
             Error::ConfigWatcherError(msg) => write!(f,"error: config watcher error:{msg}"),
             Error::MutexError(msg) => write!(f,"error: mutex error:{msg}"),
             Error::ServerError(msg) => write!(f,"error: server error:{msg}"),
+            Error::EncodeError(msg) => write!(f, "error:encode error{msg}"),
+            Error::DecodeError(msg) => write!(f, "error:decode error{msg}"),
+            Error::SerializationError(msg) => write!(f,"error:Serialization error:{msg}"),
+            Error::TryFromIntError(msg) => write!(f,"error:TryFromIntError error:{msg}")
         }
     }
 }
@@ -90,6 +146,23 @@ impl From<axum::Error> for Error {
     }
 }
 
+impl From<bincode::error::EncodeError> for Error {
+    fn from(err:bincode::error::EncodeError)->Self{
+        Error::EncodeError(err.to_string())
+    }
+}
+
+impl From<bincode::error::DecodeError> for Error {
+    fn from(err:bincode::error::DecodeError)->Self{
+        Error::DecodeError(err.to_string())
+    }
+}
+
+impl From<std::num::TryFromIntError> for Error {
+    fn from(err:std::num::TryFromIntError)->Self{
+        Error::TryFromIntError(err.to_string())
+    }
+}
 #[cfg(test)]
 mod tests {
 

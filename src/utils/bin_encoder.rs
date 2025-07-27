@@ -1,31 +1,27 @@
-use serde::Serialize;
+/// bin_encoder 关于值的序列化工具
+/// 因为值不需要支持前缀范围扫描，所以使用bincode库进行序列化
+use serde::{Deserialize, Serialize};
 use crate::db_error::Result;
 
-/// encode 模块
-/// 目标是把任意类型可以序列化成字节数组
-/// 使用bincode库进行序列化
-/// 
-pub struct Encoder{
-    buf: Vec<u8>,
+/// 初始化bincode的配置
+/// 默认配置小端序
+const CONFIG:bincode::config::Configuration = bincode::config::standard();
+
+/// 用于对值进行序列化
+pub fn encode<T:Serialize>(value:T) -> Result<Vec<u8>>{        
+    Ok(bincode::serde::encode_to_vec(value, CONFIG)?)
 }
-
-impl Encoder{
-    pub fn new() -> Self{
-        Self{buf: Vec::new()}
-    }
-    
-
-    // pub fn encode<T: Serialize>(&mut self, value: T) -> Result<Vec<u8>>{
-    //     let bytes = bincode::serialize(&value)?;
-    //     self.buf.extend_from_slice(&bytes);
-    //     Ok(self.buf.clone())
-    // }
+/// 用于反序列化成值
+pub fn decode<'de,T:Deserialize<'de>>(value:&'de [u8])->Result<T>{
+    Ok(bincode::serde::borrow_decode_from_slice(value, CONFIG)?.0)
 }
 
 #[cfg(test)]
 mod tests {
     use bincode::{Encode,Decode};
+    use super::*;
     #[test]
+    #[ignore]
     fn test_bincode(){
         #[derive(Encode,Decode,Debug)]
         pub struct Person{
@@ -56,5 +52,13 @@ mod tests {
         let (decoded_u16, _): (u16, _) = bincode::decode_from_slice(&encoded_u16, bincode::config::standard()).unwrap();
         println!("encoded_u16: {:?}", encoded_u16);
         assert_eq!(u16_value, decoded_u16);
+    }
+
+    #[test]
+    fn test_encode()->crate::db_error::Result<()>{
+        println!("{:?}",encode("test")?);
+        println!("{:?}",decode::<&str>(&[4, 116, 101, 115, 116])?);
+        assert_eq!("test",decode::<&str>(&[4, 116, 101, 115, 116])?);
+        Ok(())
     }
 }

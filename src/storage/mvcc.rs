@@ -12,6 +12,7 @@ use std::{borrow::Cow, sync::{Arc, Mutex}};
 use crate::storage::engine::Engine;
 use serde::{Serialize, Deserialize};
 
+#[allow(dead_code)]
 pub struct MVCC<E:Engine> {
     // 引擎 增加原子指针和互斥锁，目的是实现线程安全的引擎
     engine: Arc<Mutex<E>>,
