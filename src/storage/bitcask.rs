@@ -37,8 +37,7 @@ impl BitCask {
         };
         if path.is_dir() {
             //1 、遍历目录下的所有文件收集所有文件路径
-            let mut paths = read_dir(path)
-                .unwrap()
+            let mut paths = read_dir(path)?
                 .into_iter()
                 .map(|e| e.unwrap().path())
                 .collect::<Vec<_>>();
@@ -78,7 +77,7 @@ impl BitCask {
                 });
             }
         }
-        db.log = Some(Log::new(log_file_id).unwrap());
+        db.log = Some(Log::new(log_file_id)?);
         Ok(db)
     }
     /// 构建索引
@@ -150,12 +149,12 @@ impl BitCask {
             Path::new(
                 &(db_base.clone()
                     + file_id
-                        .as_str()
-                        .strip_suffix("_active")
-                        .unwrap_or(file_id.as_str())),
+                    .as_str()
+                    .strip_suffix("_active")
+                    .unwrap_or(file_id.as_str())),
             ),
         )
-        .expect("重命名失败");
+            .expect("重命名失败");
         //2、创建新的活跃文件
         let new_file_id = create_tsid().number().to_string() + "_active";
         let new_log = Log::new(new_file_id).unwrap();
@@ -182,7 +181,7 @@ impl BitCask {
         let active = &self.log;
         match active {
             None => {
-                return Ok(None);
+                Ok(None)
             }
             _ => {
                 let active_file_id = active.as_ref().unwrap().file_id.clone();
@@ -190,9 +189,9 @@ impl BitCask {
                     return Ok(Some(active.as_ref().unwrap().to_owned())); // 返回 Log 的克隆
                 }
                 let log = Log::new(file_id.to_string())?; // 创建新的 Log 实例
-                return Ok(Some(log)); // 返回新的 Log 实例
+                Ok(Some(log)) // 返回新的 Log 实例
             }
-        };
+        }
     }
 
     /// compact方法
@@ -485,7 +484,7 @@ struct Log {
 ///  crc  |tstamp|ksz   |value_sz |key   |value |
 /// ------|------|------|---------|------|------|
 #[derive(Debug)]
-struct LogEntry {
+pub(super) struct LogEntry {
     crc: Vec<u8>,
     tstamp: Vec<u8>,
     ksz: u32,
@@ -498,12 +497,12 @@ struct LogEntry {
 impl LogEntry {
     /// 初始化日志条目
     /// ```
-    /// let tstamp = crate::utils::get_timestamp_to_vec();
+    /// let tstamp = mini_db::utils::get_timestamp_to_vec();
     /// let key = "key".as_bytes().to_vec();
     /// let value = "value".as_bytes().to_vec();
-    /// let log = LogEntry::new(tstamp, key, value);
+    /// let log = mini_db::storage::LogEntry::new(tstamp, key, value);
     /// ```
-    fn new(tstamp: Vec<u8>, key: Vec<u8>, value: Vec<u8>) -> Self {
+    pub fn new(tstamp: Vec<u8>, key: Vec<u8>, value: Vec<u8>) -> Self {
         let ksz = key.len() as u32;
         let value_sz = match value.len() {
             0 => -1,
@@ -521,11 +520,11 @@ impl LogEntry {
 
     /// 构建完整性校验字段
     /// ```
-    /// let tstamp = crate::utils::get_timestamp_to_vec();
+    /// let tstamp = mini_db::utils::get_timestamp_to_vec();
     /// let key = "key".as_bytes().to_vec();
     /// let value = "value".as_bytes().to_vec();
-    /// let log = LogEntry::new(tstamp, key, value);
-    /// log.build_src();
+    /// let log = mini_db::storage::LogEntry::new(tstamp, key, value);
+    /// //log.build_src();
     /// ```
     fn build_crc(&mut self) {
         let mut hasher = Sha3_256::new();
@@ -536,8 +535,8 @@ impl LogEntry {
             self.key.clone(),
             self.value.clone(),
         ]
-        .concat()
-        .to_vec();
+            .concat()
+            .to_vec();
         hasher.update(input);
         self.crc = hasher.finalize()[15..23].to_vec();
     }
@@ -559,8 +558,8 @@ impl LogEntry {
             self.key.clone(),
             self.value.clone(),
         ]
-        .concat()
-        .to_vec();
+            .concat()
+            .to_vec();
         hex::encode(parts)
     }
 
@@ -573,7 +572,7 @@ impl LogEntry {
             self.key.clone(),
             self.value.clone(),
         ]
-        .concat()
+            .concat()
     }
     /// 根据数组恢复成结构体
     fn from_bytes(bytes: Vec<u8>) -> Self {
@@ -652,7 +651,7 @@ impl Log {
             // 5、刷新缓冲区
             writer.flush()?;
         } // 这里结束了对 writer 的借用
-          // 6、回到文件中数据的起始位置
+        // 6、回到文件中数据的起始位置
         file.rewind()?;
 
         // 7、返回文件中数据的起始位置
@@ -947,8 +946,8 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn test_scan()->Result<()>{
-        let  db = BitCask::init_db()?;
+    fn test_scan() -> Result<()> {
+        let db = BitCask::init_db()?;
 
         // db.scan(&(0..3))?;
         Ok(())

@@ -354,7 +354,8 @@ impl SerializeStructVariant for &mut KeyEncoder {
     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> crate::db_error::Result<()>
     where
         T: ?Sized + Serialize {
-         unimplemented!()
+            value.serialize(&mut **self)?;
+            Ok(())
     }
 
     fn end(self) -> crate::db_error::Result<Self::Ok> {
