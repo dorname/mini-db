@@ -87,7 +87,7 @@ impl BitCask {
             .and_then(|n| n.to_str())
             .unwrap()
             .to_string();
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(false)
             .create(false)
@@ -162,7 +162,7 @@ impl BitCask {
     }
 
     /// 判断活跃文件是否超过了限制大小
-    fn check_size_limit(file: &std::fs::File) -> bool {
+    fn check_size_limit(file: &fs::File) -> bool {
         file.metadata().unwrap().len() >= get_max_size()
     }
 
@@ -198,7 +198,7 @@ impl BitCask {
     /// 压缩活跃日志文件：
     /// 1、创建新的活跃日志文件，将所有活跃的键写入新的日志文件
     /// 2、删除旧的活跃日志文件
-    fn compact(&mut self) -> crate::db_error::Result<()> {
+    fn compact(&mut self) -> Result<()> {
         let db_base = get_db_base();
         // 3、根据旧文件名删除旧的活跃日志文件
         let old_file_id = self.log.as_ref().unwrap().file_id.clone();
@@ -288,19 +288,19 @@ impl Engine for BitCask {
                     let entry = log.read_entry(*crc_pos)?;
                     match entry {
                         Some(e) => {
-                            return Ok(Some(String::from_utf8_lossy(&e.value).to_string()));
+                            Ok(Some(String::from_utf8_lossy(&e.value).to_string()))
                         }
                         None => {
-                            return Ok(None);
+                            Ok(None)
                         }
                     }
                 }
                 None => {
-                    return Ok(None);
+                    Ok(None)
                 }
             }
         } else {
-            return Ok(None);
+            Ok(None)
         }
     }
 
@@ -411,11 +411,11 @@ impl Engine for BitCask {
 
         Ok(EngineStatus {
             name: "bitcask".to_string(),
-            logical_size: logical_size as u64,
+            logical_size,
             total_count: total_count as u64,
-            total_size: total_disk_size as u64,
-            live_size: live_disk_size as u64,
-            garbage_size: garbage_disk_size as u64,
+            total_size: total_disk_size,
+            live_size: live_disk_size,
+            garbage_size: garbage_disk_size,
         })
     }
 }
@@ -433,7 +433,7 @@ impl<'a> ScanIterator<'a> {
         let (key, value) = item;
         Ok((
             key.clone(),
-            self.log.read_entry(value.1).unwrap().unwrap().value,
+            self.log.read_entry(value.1)?.unwrap().value,
         ))
     }
 }
@@ -467,7 +467,7 @@ struct Log {
     file_id: String,
     #[allow(dead_code)]
     file_path: PathBuf,
-    file: Arc<Mutex<std::fs::File>>, // 使用 Arc 和 Mutex 包装 File
+    file: Arc<Mutex<fs::File>>, // 使用 Arc 和 Mutex 包装 File
     #[allow(dead_code)]
     current_offset: u32,
 }
@@ -510,11 +510,11 @@ impl LogEntry {
         };
         Self {
             crc: vec![],
-            tstamp: tstamp,
-            ksz: ksz,
-            value_sz: value_sz,
-            key: key,
-            value: value,
+            tstamp,
+            ksz,
+            value_sz,
+            key,
+            value,
         }
     }
 
@@ -586,8 +586,8 @@ impl LogEntry {
         Self {
             crc: bytes[0..8].to_vec(),
             tstamp: bytes[8..12].to_vec(),
-            ksz: ksz,
-            value_sz: value_sz,
+            ksz,
+            value_sz,
             key: key.to_vec(),
             value: value.to_vec(),
         }
@@ -599,7 +599,7 @@ impl LogEntry {
     }
     /// 初始化校验字段的位置
     fn init_crc_pos(&self, belong_log: Log) -> u32 {
-        belong_log.current_offset as u32
+        belong_log.current_offset
     }
 }
 
@@ -610,9 +610,9 @@ impl Log {
         let db_base = get_db_base();
         let path = PathBuf::from(db_base.clone() + file_id.as_str());
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?
+            fs::create_dir_all(dir)?
         }
-        let file = std::fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -622,7 +622,7 @@ impl Log {
         Ok(Self {
             file_path: path,
             file: Arc::new(Mutex::new(file)),
-            file_id: file_id,
+            file_id,
             current_offset: 0,
         })
     }
@@ -655,7 +655,7 @@ impl Log {
         file.rewind()?;
 
         // 7、返回文件中数据的起始位置
-        Ok(pos as u64)
+        Ok(pos)
     }
 
     /// value位置、value大小、crc位置读取值
@@ -692,7 +692,7 @@ impl Log {
         // 3、计算条目总长度，并构建结构体
         let entry_len: usize = (20u32 + ksz + value_sz) as usize;
 
-        let mut entry = vec![0u8; entry_len as usize];
+        let mut entry = vec![0u8; entry_len];
         if let Err(e) = file.seek(SeekFrom::Start(crc_pos as u64)) {
             eprintln!("定位文件指针时出错: {}", e);
             return Err(e.into());
@@ -781,7 +781,7 @@ mod tests {
         println!("{:?}", log_entry);
         assert_eq!("test-3333", String::from_utf8_lossy(&log_entry.value));
         // 删除测试文件
-        std::fs::remove_file(temp_path).unwrap();
+        fs::remove_file(temp_path).unwrap();
     }
 
     #[test]
@@ -789,7 +789,7 @@ mod tests {
     fn test_read_log() {
         let file_id = "696392295149515530_active".to_string();
         let log_db = Log::new(file_id).unwrap();
-        let pos = 23 as u64;
+        let pos = 23u64;
         let mut buf = vec![0u8; 5];
         let mut file = log_db.file.lock().unwrap();
         file.seek(SeekFrom::Start(pos)).unwrap();

@@ -1,7 +1,6 @@
-
-use std::{f64::consts::E, fmt::{write, Display}};
-
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
+use std::string::FromUtf8Error;
 
 use crate::cfg::Config;
 /// 自定义错误信息
@@ -27,14 +26,16 @@ pub enum Error {
     MutexError(String),
     /// 服务器错误
     ServerError(String),
-    /// keycode/bincode 编码错误
+    /// bincode 编码错误
     EncodeError(String),
-    /// keycode/bincode 解码错误
+    /// bincode 解码错误
     DecodeError(String),
-    /// 序列化类型
+    /// keycode 序列化类型
     SerializationError(String),
     /// TryFromIntError
-    TryFromIntError(String)
+    TryFromIntError(String),
+    /// keycode 反序列化错误类型
+    DeserializationError(String),
 }
 
 /// 自定义错误类型
@@ -42,6 +43,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// 实现标准库std::error::Error特征
 impl std::error::Error for Error {}
+
+impl serde::de::Error for Error {
+    fn custom<T: Display>(msg: T) -> Self {
+        Error::InvalidData(msg.to_string())
+    }
+}
 
 impl serde::ser::Error for Error {
     #[doc = r" Used when a [`Serialize`] implementation encounters any error"]
@@ -79,13 +86,15 @@ impl serde::ser::Error for Error {
     #[doc = r""]
     #[doc = r" [`Path`]: std::path::Path"]
     #[doc = r" [`Serialize`]: crate::Serialize"]
-    fn custom<T>(msg:T) -> Self where T:Display {
+    fn custom<T>(msg: T) -> Self
+    where
+        T: Display,
+    {
         Self::SerializationError(msg.to_string())
     }
 }
-
 /// 实现格式输出
-impl std::fmt::Display for Error {
+impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Error::Abort => write!(f, "opertion aborted"),
@@ -94,14 +103,15 @@ impl std::fmt::Display for Error {
             Error::ParserError(msg) => write!(f, "parser error:{msg}"),
             Error::ReadOnly => write!(f, "error: readonly"),
             Error::Serialization => write!(f, "error: Serialization"),
-            Error::ConfigError(msg) => write!(f,"error: config error:{msg}"),
-            Error::ConfigWatcherError(msg) => write!(f,"error: config watcher error:{msg}"),
-            Error::MutexError(msg) => write!(f,"error: mutex error:{msg}"),
-            Error::ServerError(msg) => write!(f,"error: server error:{msg}"),
-            Error::EncodeError(msg) => write!(f, "error:encode error{msg}"),
-            Error::DecodeError(msg) => write!(f, "error:decode error{msg}"),
-            Error::SerializationError(msg) => write!(f,"error:Serialization error:{msg}"),
-            Error::TryFromIntError(msg) => write!(f,"error:TryFromIntError error:{msg}")
+            Error::ConfigError(msg) => write!(f, "error: config error:{msg}"),
+            Error::ConfigWatcherError(msg) => write!(f, "error: config watcher error:{msg}"),
+            Error::MutexError(msg) => write!(f, "error: mutex error:{msg}"),
+            Error::ServerError(msg) => write!(f, "error: server error:{msg}"),
+            Error::EncodeError(msg) => write!(f, "error:binCoder encode error{msg}"),
+            Error::DecodeError(msg) => write!(f, "error:binCoder decode error{msg}"),
+            Error::SerializationError(msg) => write!(f, "error:Serialization error:{msg}"),
+            Error::TryFromIntError(msg) => write!(f, "error:TryFromIntError error:{msg}"),
+            Error::DeserializationError(msg) => write!(f, "error:Deserialization error:{msg}"),
         }
     }
 }
@@ -111,8 +121,13 @@ impl std::fmt::Display for Error {
 #[macro_export]
 macro_rules! errdata {
     ($($args:tt)*) => {
-        $crate::db_error::Error::InvalidData(format!($($args)*))
+        $crate::db_error::Error::InvalidData(format!($($args)*)).into()
     };
+}
+impl<T> From<Error> for Result<T> {
+    fn from(error: Error) -> Self {
+        Err(error)
+    }
 }
 
 impl From<std::io::Error> for Error {
@@ -147,27 +162,39 @@ impl From<axum::Error> for Error {
 }
 
 impl From<bincode::error::EncodeError> for Error {
-    fn from(err:bincode::error::EncodeError)->Self{
+    fn from(err: bincode::error::EncodeError) -> Self {
         Error::EncodeError(err.to_string())
     }
 }
 
 impl From<bincode::error::DecodeError> for Error {
-    fn from(err:bincode::error::DecodeError)->Self{
+    fn from(err: bincode::error::DecodeError) -> Self {
         Error::DecodeError(err.to_string())
     }
 }
 
 impl From<std::num::TryFromIntError> for Error {
-    fn from(err:std::num::TryFromIntError)->Self{
+    fn from(err: std::num::TryFromIntError) -> Self {
+        Error::TryFromIntError(err.to_string())
+    }
+}
+impl From<std::array::TryFromSliceError> for Error {
+    fn from(err: std::array::TryFromSliceError) -> Self {
+        Error::TryFromIntError(err.to_string())
+    }
+}
+
+impl From<FromUtf8Error> for Error {
+    fn from(err: FromUtf8Error) -> Self {
         Error::TryFromIntError(err.to_string())
     }
 }
 #[cfg(test)]
 mod tests {
+    use crate::db_error;
 
     #[test]
-    fn test_errdata() {
-        errdata!("test");
+    fn test_err_data() -> db_error::Result<()> {
+        errdata!("test")
     }
 }
