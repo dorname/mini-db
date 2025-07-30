@@ -1,7 +1,7 @@
 use crate::db_error::{Error, Result};
 use crate::errdata;
 use itertools::Either;
-use serde::de::{DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess, Visitor};
+use serde::de::{DeserializeSeed, EnumAccess, IntoDeserializer, SeqAccess, VariantAccess, Visitor};
 use serde::ser::Impossible;
 use serde::{ser::{SerializeSeq, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant}, Deserializer, Serialize, Serializer};
 
@@ -388,7 +388,7 @@ impl<'de> KeyDecoder<'de> {
     }
 
     /// 解析字符串类型的字节数组
-    pub fn decode_from_bytes(&mut self) -> Result<Vec<u8>> {
+    pub fn decode_next_bytes(&mut self) -> Result<Vec<u8>> {
         let mut result = Vec::<u8>::new();
         let mut iter = self.input.iter().enumerate();
         let taken = loop {
@@ -537,7 +537,7 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
     where
         V: Visitor<'de>,
     {
-        let decoded = self.decode_from_bytes()?;
+        let decoded = self.decode_next_bytes()?;
         visitor.visit_str(&String::from_utf8(decoded)?)
     }
 
@@ -545,7 +545,7 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
     where
         V: Visitor<'de>,
     {
-        let decoded = self.decode_from_bytes()?;
+        let decoded = self.decode_next_bytes()?;
         visitor.visit_string(String::from_utf8(decoded)?)
     }
 
@@ -553,7 +553,7 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
     where
         V: Visitor<'de>,
     {
-        let decoded = self.decode_from_bytes()?;
+        let decoded = self.decode_next_bytes()?;
         visitor.visit_bytes(&decoded[..])
     }
 
@@ -561,7 +561,7 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
     where
         V: Visitor<'de>,
     {
-        let decoded = self.decode_from_bytes()?;
+        let decoded = self.decode_next_bytes()?;
         visitor.visit_byte_buf(decoded)
     }
 
