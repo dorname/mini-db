@@ -4,6 +4,7 @@ use itertools::Either;
 use serde::de::{DeserializeSeed, EnumAccess, IntoDeserializer, SeqAccess, VariantAccess, Visitor};
 use serde::ser::Impossible;
 use serde::{ser::{SerializeSeq, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant}, Deserializer, Serialize, Serializer};
+use std::ops::Bound;
 
 /// key_encoder 关于键的自定义序列化工具
 /// 目标:
@@ -29,6 +30,25 @@ impl KeyEncoder {
         // 3、写入缓冲输出
         self.buf.extend_from_slice(&bytes);
         Ok(())
+    }
+
+    /// prefix_range
+    /// 根据前缀的字节数组构建btreeMap存储引擎的扫描范围
+    /// 注意：下边界的处理，把前缀最后一个非0xff的数据加1.如果全是0xff则返回会无边界
+    /// 目标：保证下边界比上边界大=>能够扫描到对应的key
+    pub fn prefix_range(prefix: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+        // 1、创建range的起始边界
+        let start = Bound::Included(prefix.to_vec());
+        // 2、处理下边界
+        let end = match prefix.iter().rposition(|&b| b != 0xff) {
+            None => Bound::Unbounded,
+            Some(i) => {
+                let mut next = prefix[..i].to_vec();
+                next.push(prefix[i] + 1);
+                Bound::Excluded(next)
+            }
+        };
+        (start, end)
     }
 }
 
@@ -707,8 +727,10 @@ impl<'de> VariantAccess<'de> for &mut KeyDecoder<'de> {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
     use itertools::Either;
-
+    use std::collections::BTreeMap;
+    use std::ops::Bound;
 
     #[test]
     #[ignore]
@@ -726,5 +748,40 @@ mod tests {
         let mut items: Vec<u8> = vec![];
         items.extend(bytes);
         println!("{:?}", items);
+    }
+
+
+    #[test]
+    #[ignore]
+    fn test_bound() {
+        let mut btree_map = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        let idx = "my_h".as_bytes();
+        let key = "my_key".as_bytes();
+        let str = "abcv\x00";
+        let v = str.as_bytes();
+        let key1 = "my_key_hhhh".as_bytes();
+        let key2 = "my_hey_h".as_bytes();
+        let v1 = "xxxx".as_bytes();
+        let v2 = "666666".as_bytes();
+        btree_map.insert(key.to_vec(), v.to_vec());
+        btree_map.insert(key1.to_vec(), v1.to_vec());
+        btree_map.insert(key2.to_vec(), v2.to_vec());
+        let start = Bound::Included(idx.to_vec());
+        let mut end_bound = idx.to_vec();
+        let len = end_bound.len();
+        end_bound[len - 1] += 1;
+        let end = Bound::Excluded(end_bound);
+        let result = btree_map.range((start, end));
+        for (key, val) in result {
+            println!("{}: {}", String::from_utf8_lossy(key), String::from_utf8_lossy(val));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_bound2() {
+        let key = b"my_key\xff";
+        let bound = KeyEncoder::prefix_range(key);
+        println!("{:?}", bound);
     }
 }
