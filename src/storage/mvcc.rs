@@ -236,13 +236,23 @@ impl<E: Engine> Transaction<E> {
                 key => return errdata!("require Key::Version got {key:?}"),
             }
         }
-        // 5、写入新版本
+        // 5、
         // 表示这个 key 在当前事务版本（self.state.version）中有写入行为。
-        session.set(&Key::ActiveWrite(self.state.version, key.into()).encode()?, 
+        // - 记录事务写操作：这里创建了一个特殊类型的记录 ActiveWrite(version, key)，用来跟踪当前事务（由 self.state.version 标识）修改了哪个键。
+        // - 目的是支持事务回滚：如果事务需要回滚，系统需要知道该事务修改了哪些键，以便撤销这些修改。通过扫描所有 ActiveWrite(version, ...) 记录，系统可以找出所有需要删除的版本。
+        // - 值为空向量 vec![]：因为只需要记录"这个键被这个事务修改过"这一事实，不需要存储实际值（实际值会存储在 Key::Version 记录中）。
+        // 为什么需要这个记录：
+        // 在 rollback() 方法中，系统会扫描所有 ActiveWrite(version, key) 记录，找出当前事务写入的所有键
+        // 然后删除对应的 Version(key, version) 记录以及 ActiveWrite 记录本身
+        // 如果没有这些记录，系统将无法知道需要回滚哪些键
+        // 与活跃事务集的关系：
+        // 活跃事务集(active set)是通过 Active(version) 记录来跟踪的，不是 ActiveWrite 记录
+        // ActiveWrite 只记录事务内部的写操作，与其他事务的版本无关
+        session.set(&Key::ActiveWrite(self.state.version, key.into()).encode()?,
                     &vec![])?;
         // 写入key
         session.set(&Key::Version(key.into(), self.state.version).encode()?
-        ,&bin_coder::encode(value)?)?;
+                    , &bin_coder::encode(value)?)?;
         Ok(())
     }
 
