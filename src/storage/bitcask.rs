@@ -1,6 +1,7 @@
 use crate::cfg::{get_db_base, get_max_size};
 use crate::db_error::Result;
 use crate::storage::engine::{Engine, EngineStatus};
+use std::collections::btree_map::Range;
 
 use fs4::fs_std::FileExt;
 use sha3::{Digest, Sha3_256};
@@ -205,9 +206,9 @@ impl BitCask {
         // 1、创建新的活跃日志文件
         let new_log = Log::new(create_tsid().number().to_string() + "_active")?;
         self.log = Some(new_log);
-        fn write(log: &mut Log, key: Vec<u8>, value: &str) -> Result<u64> {
+        fn write(log: &mut Log, key: Vec<u8>, value: Vec<u8>) -> Result<u64> {
             let tstamp = crate::utils::get_timestamp_to_vec();
-            let mut log_entry = LogEntry::new(tstamp, key.clone(), value.as_bytes().to_vec());
+            let mut log_entry = LogEntry::new(tstamp, key, value);
             log_entry.build_crc(); // 构建crc校验字段
             log.write_entry(log_entry)
         }
@@ -218,7 +219,7 @@ impl BitCask {
             write(
                 self.log.as_mut().unwrap(),
                 key.clone(),
-                &value.unwrap().as_str(),
+                value.unwrap(),
             )?;
         }
         self.flush()?;
@@ -228,6 +229,7 @@ impl BitCask {
 }
 
 impl Engine for BitCask {
+    type ScanIter<'a> = ScanIterator<'a>;
     /// 写入条目数据
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         // 0、获取当前key所在的文件
@@ -249,19 +251,23 @@ impl Engine for BitCask {
         } else {
             {
                 let log = self.log.as_ref().unwrap();
+                let file = log.file.lock()?;
                 let need_compact = log.file_id == current_file_id
-                    && BitCask::check_size_limit(&log.file.lock().unwrap());
+                    && BitCask::check_size_limit(&file);
                 info!("需要压缩:{:?}", need_compact);
                 if need_compact {
+                    drop(file);
                     self.compact()?;
                 }
             }
             {
                 let log = self.log.as_ref().unwrap();
+                let file = log.file.lock()?;
                 let need_refresh = log.file_id == current_file_id
-                    && BitCask::check_size_limit(&log.file.lock().unwrap());
+                    && BitCask::check_size_limit(&file);
                 info!("需要写入到新的活跃文件:{:?}", need_refresh);
                 if need_refresh {
+                    drop(file);
                     self.refresh_active();
                 }
             }
@@ -277,7 +283,7 @@ impl Engine for BitCask {
     }
     /// 读取条目数据
     /// 根据keyDir取获取
-    fn get(&self, key: &[u8]) -> Result<Option<String>> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         // 1、根据key,从keydir中读相关的存储信息
         // KeyDir：key ——— (fileId、crc_pos）
         if let Some((_, crc_pos)) = self.keydir.get(key) {
@@ -288,7 +294,7 @@ impl Engine for BitCask {
                     let entry = log.read_entry(*crc_pos)?;
                     match entry {
                         Some(e) => {
-                            Ok(Some(String::from_utf8_lossy(&e.value).to_string()))
+                            Ok(Some(e.value))
                         }
                         None => {
                             Ok(None)
@@ -319,15 +325,11 @@ impl Engine for BitCask {
         }
         Ok(())
     }
-    fn scan(&self, range: impl std::ops::RangeBounds<Vec<u8>>) -> Result<Vec<(Vec<u8>, String)>> {
-        Ok(self
-            .keydir
-            .range(range)
-            .map(|(key, _)| {
-                let value = self.get(key).unwrap();
-                (key.clone(), value.unwrap())
-            })
-            .collect::<Vec<(Vec<u8>, String)>>())
+    fn scan(&mut self, range: impl std::ops::RangeBounds<Vec<u8>>) -> Self::ScanIter<'_> {
+        Self::ScanIter {
+            inner: self.keydir.range(range),
+            log: &mut self.log,
+        }
     }
 
     fn clear(&mut self) -> Result<()> {
@@ -424,16 +426,17 @@ impl Engine for BitCask {
 /// ScanIterator
 pub struct ScanIterator<'a> {
     /// 迭代器
-    inner: std::collections::btree_map::Iter<'a, Vec<u8>, ValTuple>,
+    inner: Range<'a, Vec<u8>, ValTuple>,
     /// 所属日志
-    log: &'a mut Log,
+    log: &'a mut Option<Log>,
 }
 impl<'a> ScanIterator<'a> {
     fn map(&mut self, item: (&Vec<u8>, &ValTuple)) -> <Self as Iterator>::Item {
         let (key, value) = item;
+        let log = self.log.as_mut().unwrap();
         Ok((
             key.clone(),
-            self.log.read_entry(value.1)?.unwrap().value,
+            log.read_entry(value.1)?.unwrap().value,
         ))
     }
 }
@@ -641,7 +644,7 @@ impl Log {
         let total_size: usize = log_entry.get_entry().len();
         let pos;
         // 2、设置文件插入指针
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock()?;
         pos = file.seek(SeekFrom::End(0))?;
         // 3、创建一个文件的缓冲区
         {
@@ -663,7 +666,7 @@ impl Log {
         // 1、计算ksz
         let mut ksz_v = [0u8; 4];
         let ksz_pos = (crc_pos + 12) as u64;
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock()?;
 
         if let Err(e) = file.seek(SeekFrom::Start(ksz_pos)) {
             eprintln!("定位文件指针时出错: {}", e);
@@ -871,8 +874,8 @@ mod tests {
         println!("开始读取数据");
         match db.get(&key) {
             Ok(Some(val)) => {
-                println!("读取成功: {}", val);
-                assert_eq!(val, String::from_utf8_lossy(&value));
+                println!("读取成功: {:?}", val);
+                assert_eq!(val, value);
             }
             Ok(None) => {
                 panic!("未找到键: {:?}", String::from_utf8_lossy(&key));
@@ -900,7 +903,7 @@ mod tests {
         let _ = db.set(&"key_1".as_bytes().to_vec(), &"value_1".as_bytes().to_vec());
         assert_eq!(
             db.get(&"key_1".as_bytes().to_vec()).unwrap().unwrap(),
-            "value_1"
+            "value_1".as_bytes().to_vec()
         );
     }
 

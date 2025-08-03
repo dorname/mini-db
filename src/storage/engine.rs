@@ -1,12 +1,18 @@
 use crate::db_error::Result;
+use crate::utils::key_coder::prefix_range;
+
 /// Engine trait
 /// 定义存储引擎的通用行为
 pub trait Engine: Send {
+    //定义一个迭代器类型
+    type ScanIter<'a>: ScanIter + 'a
+    where
+        Self: Sized + 'a;
     // 为特定键值Key,设置一个值Value,替代原本已有的值
-    fn set(&mut self, key: &[u8], value:&[u8]) -> Result<()>;
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
 
     // 为特定键值Key,获取一个值Value+
-    fn get(&self, key: &[u8]) -> Result<Option<String>>;
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
     // 删除一个键值Key
     fn delete(&mut self, key: &[u8]) -> Result<()>;
@@ -28,7 +34,7 @@ pub trait Engine: Send {
     }
 
     // 批量获取键值对
-    fn batch_get(&mut self, keys: Vec<&[u8]>) -> Result<Vec<Option<String>>> {
+    fn batch_get(&mut self, keys: Vec<&[u8]>) -> Result<Vec<Option<Vec<u8>>>> {
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
             results.push(self.get(key)?);
@@ -38,21 +44,27 @@ pub trait Engine: Send {
 
     // 扫描指定范围的键值对
     // 由于Btree本身是基于key排序的，所以需要指定开始和结束的键值范围
-    fn scan(&self, range: impl std::ops::RangeBounds<Vec<u8>>) -> Result<Vec<(Vec<u8>, String)>>;
+    fn scan(&mut self, range: impl std::ops::RangeBounds<Vec<u8>>) -> Self::ScanIter<'_>
+    where
+        Self: Sized;
 
     // 清空所有数据
     fn clear(&mut self) -> Result<()>;
 
     fn status(&mut self) -> Result<EngineStatus>;
+    fn scan_prefix(&mut self, prefix: &[u8]) -> Self::ScanIter<'_> 
+    where Self: Sized {
+        self.scan(prefix_range(prefix))
+    }
 }
 
 /// ScanIterator是一个用于遍历存储引擎中键值对的迭代器接口。
 /// 它的设计强调了灵活性和错误处理能力，适合在需要双向遍历和处理潜在错误的场景中使用。
 /// 通过继承DoubleEndedIterator，它为存储引擎的实现提供了一个强大的工具，用于高效地扫描和处理数据。
-pub trait ScanIter: DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>> {}
+pub trait ScanIter: DoubleEndedIterator<Item=Result<(Vec<u8>, Vec<u8>)>> {}
 
 /// 为继承DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>>的所有类型实现ScanIter特征
-impl<I: DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>>> ScanIter for I {}
+impl<I: DoubleEndedIterator<Item=Result<(Vec<u8>, Vec<u8>)>>> ScanIter for I {}
 
 /// 定义引擎状态
 /// Engine Status

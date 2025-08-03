@@ -3,8 +3,42 @@ use crate::errdata;
 use itertools::Either;
 use serde::de::{DeserializeSeed, EnumAccess, IntoDeserializer, SeqAccess, VariantAccess, Visitor};
 use serde::ser::Impossible;
-use serde::{ser::{SerializeSeq, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant}, Deserializer, Serialize, Serializer};
+use serde::{ser::{SerializeSeq, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant}, Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::Bound;
+
+/// 序列化方法
+pub fn encode<T: Serialize>(key: &T) -> Result<Vec<u8>> {
+    let mut encoder = KeyEncoder::new();
+    key.serialize(&mut encoder).expect("serialize error:type cant serialize");
+    Ok(encoder.buf)
+}
+
+/// 反序列化方法
+pub fn decode<'de, T: Deserialize<'de>>(key: &'de [u8]) -> Result<T> {
+    let mut decoder = KeyDecoder::new(key);
+    let value = T::deserialize(&mut decoder)?;
+    Ok(value)
+}
+
+/// prefix_range
+/// 根据前缀的字节数组构建btreeMap存储引擎的扫描范围
+/// 注意：下边界的处理，把前缀最后一个非0xff的数据加1.如果全是0xff则返回会无边界
+/// 目标：保证下边界比上边界大=>能够扫描到对应的key
+pub fn prefix_range(prefix: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    // 1、创建range的起始边界
+    let start = Bound::Included(prefix.to_vec());
+    // 2、处理下边界
+    let end = match prefix.iter().rposition(|&b| b != 0xff) {
+        None => Bound::Unbounded,
+        Some(i) => {
+            let mut next = prefix[..i].to_vec();
+            next.push(prefix[i] + 1);
+            Bound::Excluded(next)
+        }
+    };
+    (start, end)
+}
+
 
 /// key_encoder 关于键的自定义序列化工具
 /// 目标:
@@ -30,25 +64,6 @@ impl KeyEncoder {
         // 3、写入缓冲输出
         self.buf.extend_from_slice(&bytes);
         Ok(())
-    }
-
-    /// prefix_range
-    /// 根据前缀的字节数组构建btreeMap存储引擎的扫描范围
-    /// 注意：下边界的处理，把前缀最后一个非0xff的数据加1.如果全是0xff则返回会无边界
-    /// 目标：保证下边界比上边界大=>能够扫描到对应的key
-    pub fn prefix_range(prefix: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
-        // 1、创建range的起始边界
-        let start = Bound::Included(prefix.to_vec());
-        // 2、处理下边界
-        let end = match prefix.iter().rposition(|&b| b != 0xff) {
-            None => Bound::Unbounded,
-            Some(i) => {
-                let mut next = prefix[..i].to_vec();
-                next.push(prefix[i] + 1);
-                Bound::Excluded(next)
-            }
-        };
-        (start, end)
     }
 }
 
@@ -781,7 +796,7 @@ mod tests {
     #[ignore]
     fn test_bound2() {
         let key = b"my_key\xff";
-        let bound = KeyEncoder::prefix_range(key);
+        let bound = prefix_range(key);
         println!("{:?}", bound);
     }
 }

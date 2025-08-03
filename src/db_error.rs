@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::string::FromUtf8Error;
-
-use crate::cfg::Config;
+use std::sync::PoisonError;
 /// 自定义错误信息
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Error {
@@ -22,8 +21,6 @@ pub enum Error {
     ConfigError(String),
     /// 配置监听错误
     ConfigWatcherError(String),
-    /// Mutex 锁错误
-    MutexError(String),
     /// 服务器错误
     ServerError(String),
     /// bincode 编码错误
@@ -36,6 +33,8 @@ pub enum Error {
     TryFromIntError(String),
     /// keycode 反序列化错误类型
     DeserializationError(String),
+    /// 获取锁错误
+    PoisonError(String),
 }
 
 /// 自定义错误类型
@@ -105,13 +104,13 @@ impl Display for Error {
             Error::Serialization => write!(f, "error: Serialization"),
             Error::ConfigError(msg) => write!(f, "error: config error:{msg}"),
             Error::ConfigWatcherError(msg) => write!(f, "error: config watcher error:{msg}"),
-            Error::MutexError(msg) => write!(f, "error: mutex error:{msg}"),
             Error::ServerError(msg) => write!(f, "error: server error:{msg}"),
             Error::EncodeError(msg) => write!(f, "error:binCoder encode error{msg}"),
             Error::DecodeError(msg) => write!(f, "error:binCoder decode error{msg}"),
             Error::SerializationError(msg) => write!(f, "error:Serialization error:{msg}"),
             Error::TryFromIntError(msg) => write!(f, "error:TryFromIntError error:{msg}"),
             Error::DeserializationError(msg) => write!(f, "error:Deserialization error:{msg}"),
+            Error::PoisonError(msg) => write!(f, "error:PoisonError error:{msg}"),
         }
     }
 }
@@ -149,12 +148,6 @@ impl From<notify::Error> for Error {
     }
 }
 
-impl From<std::sync::PoisonError<std::sync::MutexGuard<'_, Config>>> for Error {
-    fn from(err: std::sync::PoisonError<std::sync::MutexGuard<'_, Config>>) -> Self {
-        Error::MutexError(err.to_string())
-    }
-}
-
 impl From<axum::Error> for Error {
     fn from(err: axum::Error) -> Self {
         Error::ServerError(err.to_string())
@@ -187,6 +180,12 @@ impl From<std::array::TryFromSliceError> for Error {
 impl From<FromUtf8Error> for Error {
     fn from(err: FromUtf8Error) -> Self {
         Error::TryFromIntError(err.to_string())
+    }
+}
+
+impl<T> From<PoisonError<T>> for Error {
+    fn from(value: PoisonError<T>) -> Self {
+        Error::PoisonError(value.to_string())
     }
 }
 #[cfg(test)]
