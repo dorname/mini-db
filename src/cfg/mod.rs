@@ -22,5 +22,5 @@ pub fn get_db_base()->String{
 
 pub fn get_max_size()->u64{
     let config = CONFIG.lock().unwrap();
-    config.single_file_limit * 1024 
+    config.single_file_limit * 1024 * 1024
 }

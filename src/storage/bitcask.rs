@@ -718,9 +718,11 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::{cfg::watch_config, init_tracing};
     use sha3::{Digest, Sha3_256};
     use std::{fs::read_dir, time::Duration};
+
     use tokio::{sync::broadcast, time};
     use tracing::info;
 
@@ -925,6 +927,8 @@ mod tests {
     }
 
     use crate::cfg::CONFIG;
+
+
     #[tokio::test]
     async fn test_init_db_async() {
         init_tracing();
@@ -949,10 +953,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn test_scan() -> Result<()> {
-        let db = BitCask::init_db()?;
-
-        // db.scan(&(0..3))?;
-        Ok(())
+    fn test_minus() {
+        println!("{:?}", (-1i32).to_be_bytes());
     }
 }

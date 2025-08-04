@@ -2,6 +2,7 @@ use crate::db_error::Result;
 use crate::errdata;
 use crate::storage::engine::Engine;
 use crate::utils::{bin_coder, Key as KeyTrait, Value};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::MutexGuard;
@@ -25,6 +26,36 @@ pub struct MVCC<E: Engine> {
 impl<E: Engine> MVCC<E> {
     pub fn new(engine: E) -> Self {
         Self { engine: Arc::new(Mutex::new(engine)) }
+    }
+
+    /// 开启一个读写事务
+    pub fn begin(&self) -> Result<Transaction<E>> {
+        Transaction::begin(self.engine.clone())
+    }
+
+    /// 开启最近事务版本的一个只读事务
+    pub fn begin_readonly(&self) -> Result<Transaction<E>> {
+        Transaction::begin_readonly(self.engine.clone(), None)
+    }
+
+    /// 开启指定版本的只读事务
+    pub fn begin_readonly_version(&self, version: Version) -> Result<Transaction<E>> {
+        Transaction::begin_readonly(Arc::clone(&self.engine), Some(version))
+    }
+
+    /// 事务状态恢复
+    pub fn resume(&self, transaction_state: TransactionState) -> Result<Transaction<E>> {
+        Transaction::resume(self.engine.clone(), transaction_state)
+    }
+
+    /// 获取无版本标记key的值
+    pub fn get_unversioned(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.engine.lock()?.get(key)
+    }
+
+    /// 设置无版本标记的键值对
+    pub fn set_unversioned(&self, key: &Vec<u8>, value: &[u8]) -> Result<()> {
+        self.engine.lock()?.set(key, value)
     }
 }
 
@@ -72,7 +103,7 @@ pub enum Key<'a> {
 impl<'a> KeyTrait<'a> for Key<'a> {}
 
 #[derive(Debug, Deserialize, Serialize)]
-enum KeyPrefix<'a> {
+pub enum KeyPrefix<'a> {
     NextVersion,
     Active,
     Snapshot,
@@ -272,5 +303,127 @@ impl<E: Engine> Transaction<E> {
             }
         }
         Ok(active)
+    }
+
+    /// 获取当前事务版本号
+    pub fn get_version(&self) -> Version {
+        self.state.version
+    }
+
+    /// 查询当前事务是否为只读类型
+    pub fn is_readonly(&self) -> bool {
+        self.state.readonly
+    }
+
+    /// 获取事务相关状态
+    pub fn state(&self) -> &TransactionState {
+        &self.state
+    }
+
+    /// 写入键值
+    pub fn set(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        Ok(self.write(key, value)?)
+    }
+
+    /// 删除键
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        Ok(self.write(key, None)?)
+    }
+
+    /// 读取键
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut session = self.engine.lock()?;
+        let from = Key::Version(key.into(), 0).encode()?;
+        let to = Key::Version(key.into(), self.get_version()).encode()?;
+        let mut scan = session.scan(from..=to).rev();
+        while let Some((key, val)) = scan.next().transpose()? {
+            match Key::decode(&key)? {
+                Key::Version(_, version) => {
+                    if self.state.is_visible(version) {
+                        return bin_coder::decode(&val);
+                    }
+                }
+                key => return errdata!("require Key::Version got {key:?}"),
+            }
+        }
+        Ok(None)
+    }
+
+    /// 事务提交
+    pub fn commit(self) -> Result<()> {
+        //1、只读事务不用处理直接返回
+        if self.state.readonly {
+            return Ok(());
+        }
+        //2、删除当前版本下所有写事务标记键
+        let mut session = self.engine.lock()?;
+        let remove: Vec<_> = session
+            .scan_prefix(&KeyPrefix::ActiveWrite(self.state.version).encode()?)
+            .map_ok(|(k, _)| k)
+            .try_collect()?;
+
+        for key in remove {
+            session.delete(&key)?
+        }
+        //3、删除当前版本所有的活跃事务键
+        session.delete(&Key::Active(self.state.version).encode()?)
+    }
+
+    /// 事务回滚
+    pub fn rollback(&self) -> Result<()> {
+        //1、只读事务不需要处理
+        if self.state.readonly {
+            return Ok(());
+        }
+        //2、扫描当前版本所有具备【写事务】标记的key
+        let mut session = self.engine.lock()?;
+        let mut rollback = Vec::<Vec<u8>>::new();
+        let mut scan = session.scan_prefix(&KeyPrefix::ActiveWrite(self.state.version).encode()?);
+        while let Some((key, _)) = scan.next().transpose()? {
+            match Key::decode(&key)? {
+                Key::ActiveWrite(_, key) => {
+                    rollback.push(Key::Version(key, self.get_version()).encode()?);
+                }
+                key => return errdata!("require Key::ActiveWrite got {key:?}"),
+            }
+        }
+        drop(scan);
+        //3、删除当前版本所有有【写事务】标记的key
+        for key in rollback {
+            self.delete(&key)?;
+        }
+        //4、删除当前版本所有的活跃事务
+        self.delete(&Key::Active(self.state.version).encode()?)
+    }
+
+    /// 恢复指定事务的状态
+    fn resume(engine: Arc<Mutex<E>>, s: TransactionState) -> Result<Self> {
+        // 检验合法性，如果事务不是只读事务且没有活跃事务存在则报错
+        if !s.readonly && engine.lock()?.get(&Key::Active(s.version).encode()?)?.is_none() {
+            return Err(errdata!("no active key"));
+        }
+        Ok(Self { engine, state: s })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BitCask;
+
+    #[test]
+    fn test_create_mvcc() -> Result<()> {
+        let db = BitCask::init_db()?;
+        let mvcc = MVCC::new(db);
+        let txn = mvcc.begin()?;
+        let key1 = "mvcc_key_1".as_bytes();
+        let value1 = "mvcc_value_1".as_bytes();
+        txn.set(key1, Some(value1))?;
+        println!("{:?}", txn.get(key1)?);
+        txn.commit()?;
+        // let read_txn = mvcc.begin_readonly()?;
+        // let read_key1 = read_txn.get(key1)?;
+        // assert_eq!(Some(value1.to_vec()), read_key1);
+        Ok(())
     }
 }

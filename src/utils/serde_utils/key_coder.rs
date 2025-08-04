@@ -393,7 +393,7 @@ impl SerializeTupleVariant for &mut KeyEncoder {
     where
         T: ?Sized + Serialize,
     {
-        unimplemented!()
+        value.serialize(&mut **self)
     }
 
     fn end(self) -> Result<Self::Ok> {
@@ -532,7 +532,7 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
     where
         V: Visitor<'de>,
     {
-        unimplemented!()
+        visitor.visit_u64(u64::from_be_bytes(self.take_bytes(8)?.try_into()?))
     }
 
     fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value>
