@@ -3,13 +3,17 @@ use crate::errdata;
 use itertools::Either;
 use serde::de::{DeserializeSeed, EnumAccess, IntoDeserializer, SeqAccess, VariantAccess, Visitor};
 use serde::ser::Impossible;
-use serde::{ser::{SerializeSeq, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant}, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    ser::{SerializeSeq, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 use std::ops::Bound;
 
 /// 序列化方法
 pub fn encode<T: Serialize>(key: &T) -> Result<Vec<u8>> {
     let mut encoder = KeyEncoder::new();
-    key.serialize(&mut encoder).expect("serialize error:type cant serialize");
+    key.serialize(&mut encoder)
+        .expect("serialize error:type cant serialize");
     Ok(encoder.buf)
 }
 
@@ -39,7 +43,6 @@ pub fn prefix_range(prefix: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     (start, end)
 }
 
-
 /// key_encoder 关于键的自定义序列化工具
 /// 目标:
 /// 1、是把任意类型的键可以序列化成字节数组
@@ -68,7 +71,7 @@ impl KeyEncoder {
 }
 
 trait ToBeBytes {
-    type Bytes: AsRef<[u8]> + AsMut<[u8]>;  // 关键：支持索引访问
+    type Bytes: AsRef<[u8]> + AsMut<[u8]>; // 关键：支持索引访问
     fn to_be_bytes(self) -> Self::Bytes;
 }
 
@@ -118,12 +121,10 @@ impl Serializer for &mut KeyEncoder {
 
     fn serialize_bool(self, v: bool) -> Result<()> {
         // 序列化的时候 真 序列化为 1；假序列化成0
-        self.buf.push(
-            match v {
-                true => 1,
-                _ => 0
-            }
-        );
+        self.buf.push(match v {
+            true => 1,
+            _ => 0,
+        });
         Ok(())
     }
 
@@ -138,7 +139,7 @@ impl Serializer for &mut KeyEncoder {
         Ok(())
     }
 
-    /// 序列化 
+    /// 序列化
     fn serialize_i16(self, v: i16) -> Result<()> {
         self.convert_first_bit(v)
     }
@@ -153,7 +154,9 @@ impl Serializer for &mut KeyEncoder {
 
     fn serialize_i128(self, v: i128) -> Result<()> {
         let _ = v;
-        Err(Error::SerializationError("i128 is not supported".to_owned()))
+        Err(Error::SerializationError(
+            "i128 is not supported".to_owned(),
+        ))
     }
 
     fn serialize_u8(self, v: u8) -> Result<()> {
@@ -178,7 +181,9 @@ impl Serializer for &mut KeyEncoder {
 
     fn serialize_u128(self, v: u128) -> std::result::Result<Self::Ok, Self::Error> {
         let _ = v;
-        Err(Error::SerializationError("u128 is not supported".to_owned()))
+        Err(Error::SerializationError(
+            "u128 is not supported".to_owned(),
+        ))
     }
 
     fn serialize_f32(self, v: f32) -> Result<()> {
@@ -214,10 +219,12 @@ impl Serializer for &mut KeyEncoder {
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
-        let bytes = v.iter().flat_map(|&byte| match byte {
-            0x00 => Either::Left([0x00, 0xff].into_iter()),
-            byte => Either::Right([byte].into_iter()),
-        })
+        let bytes = v
+            .iter()
+            .flat_map(|&byte| match byte {
+                0x00 => Either::Left([0x00, 0xff].into_iter()),
+                byte => Either::Right([byte].into_iter()),
+            })
             .chain([0x00, 0x00]);
         self.buf.extend(bytes);
         Ok(())
@@ -238,7 +245,10 @@ impl Serializer for &mut KeyEncoder {
         unimplemented!()
     }
 
-    fn serialize_unit_struct(self, name: &'static str) -> std::result::Result<Self::Ok, Self::Error> {
+    fn serialize_unit_struct(
+        self,
+        name: &'static str,
+    ) -> std::result::Result<Self::Ok, Self::Error> {
         unimplemented!()
     }
 
@@ -304,7 +314,10 @@ impl Serializer for &mut KeyEncoder {
         Ok(self)
     }
 
-    fn serialize_map(self, len: Option<usize>) -> std::result::Result<Self::SerializeMap, Self::Error> {
+    fn serialize_map(
+        self,
+        len: Option<usize>,
+    ) -> std::result::Result<Self::SerializeMap, Self::Error> {
         unimplemented!()
     }
 
@@ -382,7 +395,6 @@ impl SerializeTupleStruct for &mut KeyEncoder {
     }
 }
 
-
 #[allow(unused)]
 impl SerializeTupleVariant for &mut KeyEncoder {
     type Ok = ();
@@ -429,7 +441,7 @@ impl<'de> KeyDecoder<'de> {
         let taken = loop {
             match iter.next() {
                 Some((_, 0x00)) => match iter.next() {
-                    Some((i, 0x00)) => break i + 1,        // terminator
+                    Some((i, 0x00)) => break i + 1,       // terminator
                     Some((_, 0xff)) => result.push(0x00), // escaped 0x00
                     _ => return errdata!("invalid data"),
                 },
@@ -458,13 +470,11 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
         V: Visitor<'de>,
     {
         let decoded = self.take_bytes(1)?;
-        visitor.visit_bool(
-            match decoded[0] {
-                0x00 => false,
-                0x01 => true,
-                _ => panic!("invalid bool value"),
-            }
-        )
+        visitor.visit_bool(match decoded[0] {
+            0x00 => false,
+            0x01 => true,
+            _ => panic!("invalid bool value"),
+        })
     }
 
     fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value>
@@ -642,7 +652,12 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
         visitor.visit_seq(self)
     }
 
-    fn deserialize_tuple_struct<V>(self, name: &'static str, len: usize, visitor: V) -> Result<V::Value>
+    fn deserialize_tuple_struct<V>(
+        self,
+        name: &'static str,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
@@ -656,14 +671,24 @@ impl<'de> Deserializer<'de> for &mut KeyDecoder<'de> {
         unimplemented!()
     }
 
-    fn deserialize_struct<V>(self, name: &'static str, fields: &'static [&'static str], visitor: V) -> Result<V::Value>
+    fn deserialize_struct<V>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    fn deserialize_enum<V>(self, name: &'static str, variants: &'static [&'static str], visitor: V) -> Result<V::Value>
+    fn deserialize_enum<V>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
@@ -710,7 +735,6 @@ impl<'de> EnumAccess<'de> for &mut KeyDecoder<'de> {
     }
 }
 
-
 #[allow(unused)]
 impl<'de> VariantAccess<'de> for &mut KeyDecoder<'de> {
     type Error = Error;
@@ -733,7 +757,11 @@ impl<'de> VariantAccess<'de> for &mut KeyDecoder<'de> {
         visitor.visit_seq(self)
     }
 
-    fn struct_variant<V>(self, fields: &'static [&'static str], visitor: V) -> std::result::Result<V::Value, Self::Error>
+    fn struct_variant<V>(
+        self,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
@@ -765,7 +793,6 @@ mod tests {
         println!("{:?}", items);
     }
 
-
     #[test]
     #[ignore]
     fn test_bound() {
@@ -788,7 +815,11 @@ mod tests {
         let end = Bound::Excluded(end_bound);
         let result = btree_map.range((start, end));
         for (key, val) in result {
-            println!("{}: {}", String::from_utf8_lossy(key), String::from_utf8_lossy(val));
+            println!(
+                "{}: {}",
+                String::from_utf8_lossy(key),
+                String::from_utf8_lossy(val)
+            );
         }
     }
 

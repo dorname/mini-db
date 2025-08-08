@@ -7,7 +7,6 @@ use std::hash::Hash;
 pub mod bin_coder;
 pub mod key_coder;
 
-
 /// 实现一个特征，用于注入自定义序列化方法
 pub trait Key<'de>: Serialize + Deserialize<'de> {
     fn encode(&self) -> Result<Vec<u8>> {
@@ -17,7 +16,6 @@ pub trait Key<'de>: Serialize + Deserialize<'de> {
         key_coder::decode(bytes)
     }
 }
-
 
 /// 实现一个特征，用于注入自定义反序列化方法
 pub trait Value: Serialize + DeserializeOwned {

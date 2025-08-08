@@ -1,10 +1,10 @@
-use std::net::{SocketAddr};
 use axum::routing::get;
 use axum::Router;
-use mini_db::cfg::{watch_config};
+use mini_db::cfg::watch_config;
 use mini_db::init_tracing;
-use tokio::sync::broadcast;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> mini_db::db_error::Result<()> {
@@ -14,7 +14,7 @@ async fn main() -> mini_db::db_error::Result<()> {
     watch_config(broadcast::channel(10).1).await;
     // 启动数据库
     let _ = mini_db::init_db()?;
-    let addr = SocketAddr::from(([127,0,0,1],6666));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 6666));
     let listener = TcpListener::bind(addr).await?;
     let app = Router::new().route("/", get(|| async { "Hello, World!" }));
     axum::serve(listener, app).await?;

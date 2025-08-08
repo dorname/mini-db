@@ -52,8 +52,10 @@ pub trait Engine: Send {
     fn clear(&mut self) -> Result<()>;
 
     fn status(&mut self) -> Result<EngineStatus>;
-    fn scan_prefix(&mut self, prefix: &[u8]) -> Self::ScanIter<'_> 
-    where Self: Sized {
+    fn scan_prefix(&mut self, prefix: &[u8]) -> Self::ScanIter<'_>
+    where
+        Self: Sized,
+    {
         self.scan(prefix_range(prefix))
     }
 }
@@ -61,10 +63,10 @@ pub trait Engine: Send {
 /// ScanIterator是一个用于遍历存储引擎中键值对的迭代器接口。
 /// 它的设计强调了灵活性和错误处理能力，适合在需要双向遍历和处理潜在错误的场景中使用。
 /// 通过继承DoubleEndedIterator，它为存储引擎的实现提供了一个强大的工具，用于高效地扫描和处理数据。
-pub trait ScanIter: DoubleEndedIterator<Item=Result<(Vec<u8>, Vec<u8>)>> {}
+pub trait ScanIter: DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>> {}
 
 /// 为继承DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>>的所有类型实现ScanIter特征
-impl<I: DoubleEndedIterator<Item=Result<(Vec<u8>, Vec<u8>)>>> ScanIter for I {}
+impl<I: DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>>> ScanIter for I {}
 
 /// 定义引擎状态
 /// Engine Status

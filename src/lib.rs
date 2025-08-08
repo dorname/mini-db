@@ -1,7 +1,7 @@
+pub mod cfg;
 pub mod db_error;
 pub mod storage;
 pub mod utils;
-pub mod cfg;
 pub use storage::BitCask;
 
 pub fn init_tracing() {
@@ -14,6 +14,6 @@ pub fn init_tracing() {
         .init();
 }
 
-pub fn init_db()->crate::db_error::Result<BitCask>{
+pub fn init_db() -> crate::db_error::Result<BitCask> {
     BitCask::init_db()
 }

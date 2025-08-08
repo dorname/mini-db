@@ -181,9 +181,7 @@ impl BitCask {
         }
         let active = &self.log;
         match active {
-            None => {
-                Ok(None)
-            }
+            None => Ok(None),
             _ => {
                 let active_file_id = active.as_ref().unwrap().file_id.clone();
                 if file_id.eq(&active_file_id) {
@@ -216,15 +214,17 @@ impl BitCask {
         let keydir = self.keydir.clone();
         for (key, _) in keydir.iter() {
             let value = self.get(key)?;
-            write(
-                self.log.as_mut().unwrap(),
-                key.clone(),
-                value.unwrap(),
-            )?;
+            write(self.log.as_mut().unwrap(), key.clone(), value.unwrap())?;
         }
         self.flush()?;
         fs::remove_file(Path::new(&(db_base.clone() + old_file_id.as_str())))?;
         Ok(())
+    }
+}
+impl Drop for BitCask {
+    fn drop(&mut self) {
+        self.flush().expect("缓冲数据无法刷入磁盘");
+        ()
     }
 }
 
@@ -252,8 +252,8 @@ impl Engine for BitCask {
             {
                 let log = self.log.as_ref().unwrap();
                 let file = log.file.lock()?;
-                let need_compact = log.file_id == current_file_id
-                    && BitCask::check_size_limit(&file);
+                let need_compact =
+                    log.file_id == current_file_id && BitCask::check_size_limit(&file);
                 info!("需要压缩:{:?}", need_compact);
                 if need_compact {
                     drop(file);
@@ -263,8 +263,8 @@ impl Engine for BitCask {
             {
                 let log = self.log.as_ref().unwrap();
                 let file = log.file.lock()?;
-                let need_refresh = log.file_id == current_file_id
-                    && BitCask::check_size_limit(&file);
+                let need_refresh =
+                    log.file_id == current_file_id && BitCask::check_size_limit(&file);
                 info!("需要写入到新的活跃文件:{:?}", need_refresh);
                 if need_refresh {
                     drop(file);
@@ -293,17 +293,11 @@ impl Engine for BitCask {
                     println!("读取文件位置:{:?}", *crc_pos);
                     let entry = log.read_entry(*crc_pos)?;
                     match entry {
-                        Some(e) => {
-                            Ok(Some(e.value))
-                        }
-                        None => {
-                            Ok(None)
-                        }
+                        Some(e) => Ok(Some(e.value)),
+                        None => Ok(None),
                     }
                 }
-                None => {
-                    Ok(None)
-                }
+                None => Ok(None),
             }
         } else {
             Ok(None)
@@ -321,7 +315,7 @@ impl Engine for BitCask {
         //1、将缓冲区的数据刷入磁盘，非测试环境下
 
         if let Some(log) = &mut self.log {
-            log.file.lock().unwrap().flush()?;
+            log.file.lock()?.flush()?;
         }
         Ok(())
     }
@@ -434,10 +428,11 @@ impl<'a> ScanIterator<'a> {
     fn map(&mut self, item: (&Vec<u8>, &ValTuple)) -> <Self as Iterator>::Item {
         let (key, value) = item;
         let log = self.log.as_mut().unwrap();
-        Ok((
-            key.clone(),
-            log.read_entry(value.1)?.unwrap().value,
-        ))
+        let val = match log.read_entry(value.1)? {
+            Some(entry) => entry.value,
+            None => vec![],
+        };
+        Ok((key.clone(), val))
     }
 }
 /// 实现由前向后迭代功能
@@ -663,8 +658,8 @@ impl Log {
 
     /// value位置、value大小、crc位置读取值
     fn read_entry(&mut self, crc_pos: u32) -> Result<Option<LogEntry>> {
+        let mut len_buf = [0u8; 4];
         // 1、计算ksz
-        let mut ksz_v = [0u8; 4];
         let ksz_pos = (crc_pos + 12) as u64;
         let mut file = self.file.lock()?;
 
@@ -673,27 +668,23 @@ impl Log {
             return Err(e.into());
         }
 
-        if let Err(e) = file.read_exact(&mut ksz_v) {
+        if let Err(e) = file.read_exact(&mut len_buf) {
             eprintln!("读取 ksz 时出错: {}", e);
             return Err(e.into());
         }
 
-        let ksz = u32::from_be_bytes(ksz_v);
+        let ksz = u32::from_be_bytes(len_buf);
         // 2、计算value_sz
-        let mut value_sz_v = [0u8; 4];
-        let value_pos = (crc_pos + 16) as u64;
-        if let Err(e) = file.seek(SeekFrom::Start(value_pos)) {
-            eprintln!("定位文件指针时出错: {}", e);
-            return Err(e.into());
+        let value_sz_pos = (crc_pos + 16) as u64;
+        file.seek(SeekFrom::Start(value_sz_pos))?;
+        file.read_exact(&mut len_buf)?;
+        let value_sz = i32::from_be_bytes(len_buf);
+        if value_sz < 0 {
+            return Ok(None);
         }
 
-        if let Err(e) = file.read_exact(&mut value_sz_v) {
-            eprintln!("读取 value_sz 时出错: {}", e);
-            return Err(e.into());
-        }
-        let value_sz = u32::from_be_bytes(value_sz_v);
         // 3、计算条目总长度，并构建结构体
-        let entry_len: usize = (20u32 + ksz + value_sz) as usize;
+        let entry_len: usize = (20u32 + ksz + value_sz as u32) as usize;
 
         let mut entry = vec![0u8; entry_len];
         if let Err(e) = file.seek(SeekFrom::Start(crc_pos as u64)) {
@@ -857,13 +848,13 @@ mod tests {
         let mut db = BitCask::init_db().unwrap();
 
         // 写入测试数据
-        let key = "key_4".as_bytes().to_vec();
-        let value = "test".as_bytes().to_vec();
+        let key = "key_4".as_bytes();
+        let value = "test".as_bytes();
         // println!("开始写入数据");
-        let _ = db.set(&key, &value);
+        let _ = db.set(key, value);
         println!(
             "写入文件位置指针:{:?}",
-            db.get_log_by_key(key.clone())
+            db.get_log_by_key(key.to_vec())
                 .unwrap()
                 .unwrap()
                 .file
@@ -874,7 +865,7 @@ mod tests {
 
         // 读取测试数据
         println!("开始读取数据");
-        match db.get(&key) {
+        match db.get(key) {
             Ok(Some(val)) => {
                 println!("读取成功: {:?}", val);
                 assert_eq!(val, value);
@@ -927,7 +918,6 @@ mod tests {
     }
 
     use crate::cfg::CONFIG;
-
 
     #[tokio::test]
     async fn test_init_db_async() {

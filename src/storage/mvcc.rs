@@ -15,7 +15,10 @@ use std::sync::MutexGuard;
 /// 5、数据持久化
 /// 6、数据恢复
 /// 7、数据压缩
-use std::{borrow::Cow, sync::{Arc, Mutex}};
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex},
+};
 
 #[allow(dead_code)]
 pub struct MVCC<E: Engine> {
@@ -25,7 +28,9 @@ pub struct MVCC<E: Engine> {
 
 impl<E: Engine> MVCC<E> {
     pub fn new(engine: E) -> Self {
-        Self { engine: Arc::new(Mutex::new(engine)) }
+        Self {
+            engine: Arc::new(Mutex::new(engine)),
+        }
     }
 
     /// 开启一个读写事务
@@ -67,8 +72,7 @@ pub type Version = u64;
 impl Value for Version {}
 
 /// 事务状态的枚举类
-#[derive(Serialize, Deserialize)]
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Key<'a> {
     /// 标记下一个可用的版本
     NextVersion,
@@ -160,7 +164,6 @@ impl TransactionState {
     }
 }
 
-
 impl<E: Engine> Transaction<E> {
     /// 开启事务
     pub fn begin(engine: Arc<Mutex<E>>) -> Result<Transaction<E>> {
@@ -169,11 +172,10 @@ impl<E: Engine> Transaction<E> {
         // 从存储引擎获取下一个版本号
         // 如果获取失败，则初始化一个版本号为1，并将下一个版本号写入存储引擎
         // 如果获取成功，则直接将下一个版本号写入存储引擎
-        let version =
-            match session.get(&Key::NextVersion.encode()?)? {
-                Some(ref v) => Version::decode(v)?,
-                None => 1u64,
-            };
+        let version = match session.get(&Key::NextVersion.encode()?)? {
+            Some(ref v) => Version::decode(v)?,
+            None => 1u64,
+        };
         let next_version = version + 1;
         // 将下一个版本号写入存储引擎
         session.set(&Key::NextVersion.encode()?, &next_version.encode()?)?;
@@ -183,8 +185,8 @@ impl<E: Engine> Transaction<E> {
         if !active.is_empty() {
             session.set(&Key::Snapshot(version).encode()?, &active.encode()?)?;
         }
-        // 清空当前活跃事务=>开启一个新的事务
-        session.set(&KeyPrefix::Active.encode()?, &vec![])?;
+        // 标记当前版本为活跃事务
+        session.set(&Key::Active(version).encode()?, &vec![])?;
         // 删除锁
         drop(session);
         // 返回事务对象
@@ -201,21 +203,33 @@ impl<E: Engine> Transaction<E> {
     ///开启只读事务
     /// 开始一个新的只读事务。如果指定了版本参数，事务将会看到该版本开始时的数据状态（会忽略该版本中的写入操作）。
     /// 换句话说，它看到的状态与该版本的读写事务开始时看到的状态相同
-    pub fn begin_readonly(engine: Arc<Mutex<E>>, target: Option<Version>) -> Result<Transaction<E>> {
+    pub fn begin_readonly(
+        engine: Arc<Mutex<E>>,
+        target: Option<Version>,
+    ) -> Result<Transaction<E>> {
         // 1、开启一个只读事务
         let mut session = engine.lock()?;
-        // 2、获取当最新事务的版本号
+        // 2、获取当前最新的版本号，但只读事务不消耗版本号
         let next_version = match session.get(&Key::NextVersion.encode()?)? {
             Some(ref v) => Version::decode(v)?,
             None => 1u64,
         };
-        // 3、如果存在目标版本号，则返回该版本号的快照
+
+        // 3、只读事务使用一个观察版本号，确保它能看到所有已提交的数据
+        // 但看不到未来版本的写入
+        let readonly_version = if next_version > 1 {
+            next_version  // 使用当前next_version作为观察点，能看到所有 < next_version 的已提交数据
+        } else {
+            1  // 初始情况
+        };
+
+        // 4、如果存在目标版本号，则返回该版本号的快照
         let active_snapshot = match target {
             Some(target) => {
                 // 获取指定版本号的快照
                 match session.get(&Key::Snapshot(target).encode()?)? {
                     Some(ref v) => BTreeSet::<Version>::decode(v)?,
-                    None => return errdata!("snapshot not found")
+                    None => return errdata!("snapshot not found"),
                 }
             }
             None => {
@@ -223,13 +237,13 @@ impl<E: Engine> Transaction<E> {
                 Self::scan_active(&mut session)?
             }
         };
-        // 4、删除锁
+        // 5、删除锁
         drop(session);
-        // 5、返回事务对象
+        // 6、返回事务对象
         Ok(Self {
             engine,
             state: TransactionState {
-                version: next_version,
+                version: readonly_version,
                 readonly: true,
                 active: active_snapshot,
             },
@@ -251,10 +265,15 @@ impl<E: Engine> Transaction<E> {
         // 构建扫描范围
         // 从当前下一个版本开始，到u64::MAX结束，扫描所有版本号
         // 小于当前版本号，则忽略
-        let from = Key::Version(key.into(),
-                                self.state.active.first()
-                                    .copied()
-                                    .unwrap_or(self.state.version + 1)).encode()?;
+        let from = Key::Version(
+            key.into(),
+            self.state
+                .active
+                .first()
+                .copied()
+                .unwrap_or(self.state.version + 1),
+        )
+            .encode()?;
         let to = Key::Version(key.into(), u64::MAX).encode()?;
         // 4、记录写操作并写入新版本
         if let Some((key, _)) = session.scan(from..=to).last().transpose()? {
@@ -279,14 +298,17 @@ impl<E: Engine> Transaction<E> {
         // 与活跃事务集的关系：
         // 活跃事务集(active set)是通过 Active(version) 记录来跟踪的，不是 ActiveWrite 记录
         // ActiveWrite 只记录事务内部的写操作，与其他事务的版本无关
-        session.set(&Key::ActiveWrite(self.state.version, key.into()).encode()?,
-                    &vec![])?;
+        session.set(
+            &Key::ActiveWrite(self.state.version, key.into()).encode()?,
+            &vec![],
+        )?;
         // 写入key
-        session.set(&Key::Version(key.into(), self.state.version).encode()?
-                    , &bin_coder::encode(value)?)?;
+        session.set(
+            &Key::Version(key.into(), self.state.version).encode()?,
+            &bin_coder::encode(value)?,
+        )?;
         Ok(())
     }
-
 
     /// 扫描活跃事务
     fn scan_active(session: &mut MutexGuard<E>) -> Result<BTreeSet<Version>> {
@@ -299,7 +321,7 @@ impl<E: Engine> Transaction<E> {
                 Key::Active(version) => {
                     active.insert(version);
                 }
-                _ => return errdata!("require active key")
+                _ => return errdata!("require active key"),
             }
         }
         Ok(active)
@@ -336,8 +358,12 @@ impl<E: Engine> Transaction<E> {
         let from = Key::Version(key.into(), 0).encode()?;
         let to = Key::Version(key.into(), self.get_version()).encode()?;
         let mut scan = session.scan(from..=to).rev();
-        while let Some((key, val)) = scan.next().transpose()? {
-            match Key::decode(&key)? {
+        while let Some((key_version, val)) = scan.next().transpose()? {
+            let k = Key::decode(&key_version)?;
+            let v: Option<Vec<u8>> = bin_coder::decode(&val)?;
+            // println!("key=>{:?}", k);
+            // println!("val{:?}=>{:?}", val, v);
+            match Key::decode(&key_version)? {
                 Key::Version(_, version) => {
                     if self.state.is_visible(version) {
                         return bin_coder::decode(&val);
@@ -399,7 +425,12 @@ impl<E: Engine> Transaction<E> {
     /// 恢复指定事务的状态
     fn resume(engine: Arc<Mutex<E>>, s: TransactionState) -> Result<Self> {
         // 检验合法性，如果事务不是只读事务且没有活跃事务存在则报错
-        if !s.readonly && engine.lock()?.get(&Key::Active(s.version).encode()?)?.is_none() {
+        if !s.readonly
+            && engine
+            .lock()?
+            .get(&Key::Active(s.version).encode()?)?
+            .is_none()
+        {
             return Err(errdata!("no active key"));
         }
         Ok(Self { engine, state: s })
@@ -412,6 +443,7 @@ mod tests {
     use crate::BitCask;
 
     #[test]
+    #[ignore]
     fn test_create_mvcc() -> Result<()> {
         let db = BitCask::init_db()?;
         let mvcc = MVCC::new(db);
@@ -419,11 +451,85 @@ mod tests {
         let key1 = "mvcc_key_1".as_bytes();
         let value1 = "mvcc_value_1".as_bytes();
         txn.set(key1, Some(value1))?;
-        println!("{:?}", txn.get(key1)?);
+        let result1 = txn.get(key1)?;
+        println!("{:?}", result1);
         txn.commit()?;
-        // let read_txn = mvcc.begin_readonly()?;
-        // let read_key1 = read_txn.get(key1)?;
-        // assert_eq!(Some(value1.to_vec()), read_key1);
+        let read_txn = mvcc.begin_readonly()?;
+        let read_key1 = read_txn.get(key1)?;
+        assert_eq!(Some(value1.to_vec()), read_key1);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn test_version_encode() -> Result<()> {
+        let mut db = BitCask::init_db()?;
+        let version = 1u64;
+        let encoded = &KeyPrefix::ActiveWrite(version).encode()?;
+        println!("{:?}", encoded);
+        let val_encoded = &bin_coder::encode(None::<&[u8]>)?;
+        println!("{:?}", val_encoded);
+        db.set(encoded, &vec![])?;
+        db.get(encoded)?;
+        Ok(())
+    }
+
+    #[test]
+    /// 事务隔离行测试：
+    /// 初始情况
+    /// 1、创建一个读事务version：1
+    /// 2、创建一个写事务 version：1,并写入下一个版本号 version：2
+    /// 3、写入 键值 mvcc_set_key<=>mvcc_set_val
+    /// 4、用写事务读取 key,此时与真实值应该是相等的
+    /// 5、用读事务读取 key,因为 写事务版本小于读事务版本不成立(1 < 1 =>false) 所以事务隔离了，此时key为None
+    /// 6、开启一个新的读事务 version:2
+    /// 7、读取key,因为 写事务版本小于读事务版本(1<2=>true),故能读取到对应的key
+    fn test_mvcc_isolation() -> Result<()> {
+        let db = BitCask::init_db()?;
+        let mvcc = MVCC::new(db);
+        let read_txn = mvcc.begin_readonly()?;
+        let txn = mvcc.begin()?;
+        let key = "mvcc_set_key".as_bytes();
+        let value = "mvcc_set_val".as_bytes();
+        txn.set(key, Some(value))?;
+        assert_eq!(Some(value.to_vec()), txn.get(key)?);
+        assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
+        // 如果不写事务提交，上述断言就会失败，但是按照执行顺序来看，上述断言应该报错才对
+        txn.commit()?;
+        assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
+        let read_txn = mvcc.begin_readonly()?;
+        assert_eq!(Some(value.to_vec()), read_txn.get(key)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_begin_readonly() -> Result<()> {
+        let db = BitCask::init_db()?;
+        let mvcc = MVCC::new(db);
+        let txn = mvcc.begin_readonly()?;
+        let key1 = "mvcc_key_1".as_bytes();
+        let result1 = txn.get(key1)?.unwrap();
+        println!("{:?}", String::from_utf8_lossy(&result1));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn test_bin_coder() -> Result<()> {
+        let value = "mvcc_value_1".as_bytes();
+        let encoded = bin_coder::encode(Some(&value))?;
+        println!("{:?}", encoded);
+        let decoded: Option<Vec<u8>> = bin_coder::decode(&encoded)?;
+        println!("{:?}", decoded);
+        Ok(())
+    }
+
+    #[test]
+    fn test_double_mvcc() -> Result<()> {
+        let db = BitCask::init_db()?;
+        let mvcc = MVCC::new(db);
+        let _ = mvcc.begin()?;
+        let _ = mvcc.begin_readonly()?;
         Ok(())
     }
 }

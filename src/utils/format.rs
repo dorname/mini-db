@@ -28,7 +28,11 @@ pub struct Raw;
 impl Raw {
     /// Formats raw bytes as escaped ASCII strings.
     pub fn bytes(bytes: &[u8]) -> String {
-        let escaped = bytes.iter().copied().flat_map(std::ascii::escape_default).collect_vec();
+        let escaped = bytes
+            .iter()
+            .copied()
+            .flat_map(std::ascii::escape_default)
+            .collect_vec();
         format!("\"{}\"", String::from_utf8_lossy(&escaped))
     }
 }

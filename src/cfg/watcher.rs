@@ -1,8 +1,11 @@
-use crate::cfg::{load_config};
-use notify::{Event, RecursiveMode, Result, Watcher};
-use tokio::{sync::{mpsc,broadcast},task};
-use tracing::{info, error};
 use super::config::get_config_path;
+use crate::cfg::load_config;
+use notify::{Event, RecursiveMode, Result, Watcher};
+use tokio::{
+    sync::{broadcast, mpsc},
+    task,
+};
+use tracing::{error, info};
 
 /// 监听配置文件变化，更新全局的配置实例
 pub async fn watch_config(mut shutdown: broadcast::Receiver<()>) {
@@ -63,7 +66,7 @@ mod tests {
     use super::*;
     use crate::init_tracing;
     #[tokio::test]
-    async fn test_watch_config(){
+    async fn test_watch_config() {
         init_tracing();
         watch_config(broadcast::channel(10).1).await;
     }
