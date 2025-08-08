@@ -359,8 +359,8 @@ impl<E: Engine> Transaction<E> {
         let to = Key::Version(key.into(), self.get_version()).encode()?;
         let mut scan = session.scan(from..=to).rev();
         while let Some((key_version, val)) = scan.next().transpose()? {
-            let k = Key::decode(&key_version)?;
-            let v: Option<Vec<u8>> = bin_coder::decode(&val)?;
+            // let k = Key::decode(&key_version)?;
+            // let v: Option<Vec<u8>> = bin_coder::decode(&val)?;
             // println!("key=>{:?}", k);
             // println!("val{:?}=>{:?}", val, v);
             match Key::decode(&key_version)? {
