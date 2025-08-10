@@ -21,3 +21,8 @@ axum = "0.8.4"
 serde_bytes = "0.11.17"
 bincode = { version = "2.0.1", features = ["serde"] }
 itertools = "0.14.0"
+
+[profile.dev]
+opt-level = 0
+debug = 2   # 或 "full"
+incremental = false  

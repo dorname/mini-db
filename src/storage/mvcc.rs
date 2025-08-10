@@ -1,10 +1,12 @@
 use crate::db_error::Result;
 use crate::errdata;
+use crate::storage::engine;
 use crate::storage::engine::Engine;
-use crate::utils::{bin_coder, Key as KeyTrait, Value};
+use crate::utils::{bin_coder, key_coder, Key as KeyTrait, Value};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
+use std::ops::{Bound, RangeBounds};
 use std::sync::MutexGuard;
 /// 数据事务模块
 /// 主要分为以下几个功能子模块
@@ -131,6 +133,7 @@ pub struct Transaction<E: Engine> {
 }
 
 /// 事务状态结构体
+#[derive(Clone)]
 pub struct TransactionState {
     // 版本号
     version: Version,
@@ -210,20 +213,14 @@ impl<E: Engine> Transaction<E> {
         // 1、开启一个只读事务
         let mut session = engine.lock()?;
         // 2、获取当前最新的版本号，但只读事务不消耗版本号
-        let next_version = match session.get(&Key::NextVersion.encode()?)? {
+        // 只读事务使用一个观察版本号，确保它能看到所有已提交的数据，但看不到未来版本的写入
+        // 使用当前next_version作为观察点，能看到所有 < next_version 的已提交数据
+        let readonly_version = match session.get(&Key::NextVersion.encode()?)? {
             Some(ref v) => Version::decode(v)?,
-            None => 1u64,
+            None => 1u64, // 初始情况
         };
 
-        // 3、只读事务使用一个观察版本号，确保它能看到所有已提交的数据
-        // 但看不到未来版本的写入
-        let readonly_version = if next_version > 1 {
-            next_version  // 使用当前next_version作为观察点，能看到所有 < next_version 的已提交数据
-        } else {
-            1  // 初始情况
-        };
-
-        // 4、如果存在目标版本号，则返回该版本号的快照
+        // 3、如果存在目标版本号，则返回该版本号的快照
         let active_snapshot = match target {
             Some(target) => {
                 // 获取指定版本号的快照
@@ -237,9 +234,9 @@ impl<E: Engine> Transaction<E> {
                 Self::scan_active(&mut session)?
             }
         };
-        // 5、删除锁
+        // 4、删除锁
         drop(session);
-        // 6、返回事务对象
+        // 5、返回事务对象
         Ok(Self {
             engine,
             state: TransactionState {
@@ -357,12 +354,9 @@ impl<E: Engine> Transaction<E> {
         let mut session = self.engine.lock()?;
         let from = Key::Version(key.into(), 0).encode()?;
         let to = Key::Version(key.into(), self.get_version()).encode()?;
+        // 按照版本号倒序，目的是获取最新的有效值
         let mut scan = session.scan(from..=to).rev();
         while let Some((key_version, val)) = scan.next().transpose()? {
-            // let k = Key::decode(&key_version)?;
-            // let v: Option<Vec<u8>> = bin_coder::decode(&val)?;
-            // println!("key=>{:?}", k);
-            // println!("val{:?}=>{:?}", val, v);
             match Key::decode(&key_version)? {
                 Key::Version(_, version) => {
                     if self.state.is_visible(version) {
@@ -412,14 +406,15 @@ impl<E: Engine> Transaction<E> {
                 }
                 key => return errdata!("require Key::ActiveWrite got {key:?}"),
             }
+            rollback.push(key);
         }
         drop(scan);
         //3、删除当前版本所有有【写事务】标记的key
         for key in rollback {
-            self.delete(&key)?;
+            session.delete(&key)?;
         }
         //4、删除当前版本所有的活跃事务
-        self.delete(&Key::Active(self.state.version).encode()?)
+        session.delete(&Key::Active(self.state.version).encode()?)
     }
 
     /// 恢复指定事务的状态
@@ -434,6 +429,155 @@ impl<E: Engine> Transaction<E> {
             return Err(errdata!("no active key"));
         }
         Ok(Self { engine, state: s })
+    }
+
+    /// 范围扫描
+    pub fn scan(&self, range: impl RangeBounds<Vec<u8>>) -> ScanIterator<E> {
+        let msg = "范围编码错误";
+        let start_bound = match range.start_bound() {
+            Bound::Excluded(start) => Bound::Excluded(Key::Version(start.into(), u64::MAX).encode().expect(msg)),
+            Bound::Included(start) => Bound::Included(Key::Version(start.into(), 0).encode().expect(msg)),
+            Bound::Unbounded => Bound::Included(Key::Version(vec![].into(), 0).encode().expect(msg)),
+        };
+        let end_bound = match range.end_bound() {
+            Bound::Excluded(end) => Bound::Excluded(Key::Version(end.into(), 0).encode().expect(msg)),
+            Bound::Included(end) => Bound::Included(Key::Version(end.into(), u64::MAX).encode().expect(msg)),
+            Bound::Unbounded => Bound::Excluded(KeyPrefix::Unversioned.encode().expect(msg)),
+        };
+        ScanIterator::new(
+            self.engine.clone(),
+            self.state.clone(),
+            (start_bound, end_bound),
+        )
+    }
+
+    /// 前缀扫描
+    pub fn scan_prefix(&self, prefix: &[u8]) -> ScanIterator<E> {
+        let mut prefix = KeyPrefix::Version(prefix.into()).encode().expect("序列化失败");
+        //因为字节编码默认会给末尾增加【0x00 0x00】，只有去掉末尾的【0x00 0x00】前缀扫描才会更准确
+        prefix.truncate(prefix.len() - 2);
+        let range = key_coder::prefix_range(&prefix);
+        ScanIterator::new(self.engine.clone(), self.state().clone(), range)
+    }
+}
+
+/// 对事务可见的最新活跃键值对的迭代器。
+///
+/// （单线程的）引擎通过互斥锁共享，如果在迭代器的生命周期内一直持有互斥锁可能会导致死锁
+/// （例如，当本地 SQL 引擎在进行连接操作时同时从两个表中获取数据）。因此，我们每次获取
+/// 并缓冲一批行数据，并在获取批次之间释放互斥锁。
+///
+/// 这个迭代器没有实现 DoubleEndedIterator（反向扫描），因为 SQL 层目前不需要这个功能。
+#[derive(Clone)]
+pub struct ScanIterator<E: Engine> {
+    // 存储引擎
+    engine: Arc<Mutex<E>>,
+    // 事务状态
+    txn: TransactionState,
+    // 缓冲区 存放已经是“最新且对当前事务可见”的键值对
+    buffer: VecDeque<(Vec<u8>, Vec<u8>)>,
+    // 未扫描进缓冲区的范围
+    remainder: Option<(Bound<Vec<u8>>, Bound<Vec<u8>>)>,
+}
+
+impl<E: Engine> ScanIterator<E> {
+    /// 每次锁缓冲区拉取的有效键值对存放数量
+    const BUFFER_SIZE: usize = if cfg!(test) { 2 } else { 32 };
+    pub fn new(engine: Arc<Mutex<E>>,
+               txn: TransactionState,
+               range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    ) -> Self {
+        let buffer = VecDeque::with_capacity(Self::BUFFER_SIZE);
+        Self {
+            engine,
+            txn,
+            buffer,
+            remainder: Some(range),
+        }
+    }
+
+    pub fn fill_buffer(&mut self) -> Result<()> {
+        //1、校验是否缓存池是否还有空间
+        if self.buffer.len() >= Self::BUFFER_SIZE {
+            return Ok(());
+        }
+        //2、校验还有没扫描完的范围
+        let Some(range) = self.remainder.take() else { return Ok(()) };
+
+        let range_end = range.1.clone();
+
+        let mut engine = self.engine.lock()?;
+
+        let mut iter = VersionIterator::new(&self.txn, engine.scan(range)).peekable();
+        while let Some((key, _, value)) = iter.next().transpose()? {
+            // 如果下一个键和当前的key相等，则说明我们不在最近的版本
+            match iter.peek() {
+                Some(Ok((next, _, _))) if next == &key => continue,
+                Some(Err(err)) => return Err(err.clone()),
+                Some(Ok(_)) | None => {}
+            }
+
+            // 解码value值并跳过已经删除的键
+            let Some(value) = bin_coder::decode(&value)? else { continue };
+            self.buffer.push_back((key, value));
+
+            // 当 buffer 装满时，我们要保存还没扫描的剩余范围，方便下次续扫。
+            // 由于 peek() 已经偷偷缓存了一条数据，所以在保存剩余范围前，需要先用 next() 把它消费掉并用来生成新的扫描起点。
+            if self.buffer.len() == Self::BUFFER_SIZE {
+                if let Some((next, version, _)) = iter.next().transpose()? {
+                    let range_start = Bound::Included(Key::Version(next.into(), version).encode()?);
+                    self.remainder = Some((range_start, range_end));
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<E: Engine> Iterator for ScanIterator<E> {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buffer.is_empty() {
+            if let Err(error) = self.fill_buffer() {
+                return Some(Err(error));
+            }
+        }
+        self.buffer.pop_front().map(Ok)
+    }
+}
+
+struct VersionIterator<'a, I: engine::ScanIter> {
+    // 当前正在扫描的事务
+    txn: &'a TransactionState,
+    // 存储引擎迭代器
+    inner: I,
+}
+
+impl<'a, I: engine::ScanIter> VersionIterator<'a, I> {
+    // 为存储引擎迭代器I 创建一个新的特定事务版本的迭代器VersionIterator
+    fn new(txn: &'a TransactionState, inner: I) -> Self {
+        Self { txn, inner }
+    }
+
+    //可失败的 next() 方法。返回下一个对当前事务可见的键 / 版本 / 值 三元组。
+    fn try_next(&mut self) -> Result<Option<(Vec<u8>, Version, Vec<u8>)>> {
+        while let Some((key, value)) = self.inner.next().transpose()? {
+            let Key::Version(key, version) = Key::decode(&key)? else {
+                return errdata!("require Key::Version got {key:?}");
+            };
+            if !self.txn.is_visible(version) {
+                continue;
+            }
+            return Ok(Some((key.into_owned(), version, value)));
+        }
+        Ok(None)
+    }
+}
+impl<'a, I: engine::ScanIter> Iterator for VersionIterator<'a, I> {
+    type Item = Result<(Vec<u8>, Version, Vec<u8>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.try_next().transpose()
     }
 }
 
@@ -484,7 +628,7 @@ mod tests {
     /// 5、用读事务读取 key,因为 写事务版本小于读事务版本不成立(1 < 1 =>false) 所以事务隔离了，此时key为None
     /// 6、开启一个新的读事务 version:2
     /// 7、读取key,因为 写事务版本小于读事务版本(1<2=>true),故能读取到对应的key
-    fn test_mvcc_isolation() -> Result<()> {
+    fn test_mvcc_isolation_1() -> Result<()> {
         let db = BitCask::init_db()?;
         let mvcc = MVCC::new(db);
         let read_txn = mvcc.begin_readonly()?;
@@ -501,6 +645,34 @@ mod tests {
         assert_eq!(Some(value.to_vec()), read_txn.get(key)?);
         Ok(())
     }
+
+
+    #[test]
+    fn test_mvcc_isolation_2() -> Result<()> {
+        let db = BitCask::init_db()?;
+        let mvcc = MVCC::new(db);
+        let read_txn = mvcc.begin_readonly()?;
+        let txn = mvcc.begin()?;
+        let key = "mvcc_set_key_1".as_bytes();
+        let value = "mvcc_set_val_1".as_bytes();
+        txn.set(key, Some(value))?;
+        assert_eq!(Some(value.to_vec()), txn.get(key)?);
+        assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
+        // 如果不写事务提交，上述断言就会失败，但是按照执行顺序来看，上述断言应该报错才对
+        txn.commit()?;
+        assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
+        let read_txn = mvcc.begin_readonly()?;
+        assert_eq!(Some(value.to_vec()), read_txn.get(key)?);
+        let txn = mvcc.begin()?;
+        let value = "mvcc_set_val_2".as_bytes();
+        txn.set(key, Some(value))?;
+        txn.commit()?;
+        assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
+        let read_txn = mvcc.begin_readonly()?;
+        assert_eq!(Some(value.to_vec()), read_txn.get(key)?);
+        Ok(())
+    }
+
 
     #[test]
     fn test_begin_readonly() -> Result<()> {
@@ -530,6 +702,45 @@ mod tests {
         let mvcc = MVCC::new(db);
         let _ = mvcc.begin()?;
         let _ = mvcc.begin_readonly()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_rollback() -> Result<()> {
+        let db = BitCask::init_db()?;
+        let mvcc = MVCC::new(db);
+        let txn = mvcc.begin()?;
+        let key1 = "mvcc_rollback_key".as_bytes();
+        let original_value = "mvcc_rollback_val".as_bytes();
+        let value1 = "mvcc_rollback_val_1".as_bytes();
+        // 设置原始值
+        txn.set(key1, Some(original_value))?;
+        // 提交事务
+        txn.commit()?;
+        let txn = mvcc.begin()?;
+        txn.set(key1, Some(value1))?;
+        let read_txn = mvcc.begin_readonly()?;
+        // 读事务读到的是原始值
+        assert_eq!(Some(original_value.to_vec()), read_txn.get(key1)?);
+        // 写事务读到的是新值
+        assert_eq!(Some(value1.to_vec()), txn.get(key1)?);
+        txn.rollback()?;
+        // 回滚之后读取到的原始值
+        assert_eq!(Some(original_value.to_vec()), txn.get(key1)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_val() -> Result<()> {
+        let db = BitCask::init_db()?;
+        let mvcc = MVCC::new(db);
+        let txn = mvcc.begin()?;
+        let read_txn = mvcc.begin_readonly()?;
+        let key1 = "mvcc_set_key_1".as_bytes();
+        let val = txn.get(key1)?.unwrap();
+        let original_value = read_txn.get(key1)?.unwrap();
+        println!("{:?}", String::from_utf8_lossy(&val));
+        println!("{:?}", String::from_utf8_lossy(&original_value));
         Ok(())
     }
 }
