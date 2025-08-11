@@ -4,6 +4,8 @@ pub mod storage;
 pub mod utils;
 pub use storage::BitCask;
 
+mod sql;
+
 pub fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -14,6 +16,6 @@ pub fn init_tracing() {
         .init();
 }
 
-pub fn init_db() -> crate::db_error::Result<BitCask> {
+pub fn init_db() -> db_error::Result<BitCask> {
     BitCask::init_db()
 }

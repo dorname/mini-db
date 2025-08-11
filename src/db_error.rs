@@ -35,6 +35,8 @@ pub enum Error {
     DeserializationError(String),
     /// 获取锁错误
     PoisonError(String),
+    /// 输入错误
+    UnExpectedInput(String),
 }
 
 /// 自定义错误类型
@@ -111,6 +113,7 @@ impl Display for Error {
             Error::TryFromIntError(msg) => write!(f, "error:TryFromIntError error:{msg}"),
             Error::DeserializationError(msg) => write!(f, "error:Deserialization error:{msg}"),
             Error::PoisonError(msg) => write!(f, "error:PoisonError error:{msg}"),
+            Error::UnExpectedInput(msg) => write!(f, "error:unexpectedInput:{msg}"),
         }
     }
 }
@@ -123,6 +126,15 @@ macro_rules! errdata {
         $crate::db_error::Error::InvalidData(format!($($args)*)).into()
     };
 }
+
+#[macro_export]
+macro_rules! errinput {
+    ($($args:tt)*) => {
+        $crate::db_error::Error::UnExpectedInput(format!($($args)*)).into()
+    };
+}
+
+
 impl<T> From<Error> for Result<T> {
     fn from(error: Error) -> Self {
         Err(error)
