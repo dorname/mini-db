@@ -8,7 +8,7 @@ use std::str::Chars;
 pub enum Token {
     Number(String),
     String(String),
-    Identifier(String),
+    Identifier(String), // 普通标志符
     Keyword(Keyword),
     Period,             // .
     Equal,              // =
@@ -134,6 +134,7 @@ pub enum Keyword {
     True,
     Unique,
     Update,
+    Union,
     Values,
     Varchar,
     Where,
@@ -210,6 +211,7 @@ impl TryFrom<&str> for Keyword {
             "true" => Self::True,
             "unique" => Self::Unique,
             "update" => Self::Update,
+            "union" => Self::Union,
             "values" => Self::Values,
             "varchar" => Self::Varchar,
             "where" => Self::Where,
@@ -283,6 +285,7 @@ impl Display for Keyword {
             Self::True => "TRUE",
             Self::Unique => "UNIQUE",
             Self::Update => "UPDATE",
+            Self::Union => "UNION",
             Self::Values => "VALUES",
             Self::Varchar => "VARCHAR",
             Self::Where => "WHERE",
@@ -339,6 +342,16 @@ pub struct Lexer<'a> {
     chars: Peekable<Chars<'a>>,
 }
 
+impl Iterator for Lexer<'_> {
+    type Item = crate::db_error::Result<Token>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.scan_token() {
+            Ok(Some(token)) => Some(Ok(token)),
+            Ok(None) => self.chars.peek().map(|c| errinput!("unexpected character {c}")),
+            Err(err) => Some(Err(err)),
+        }
+    }
+}
 impl<'a> Lexer<'a> {
     /// 创建一个解析器结构体：
     ///
@@ -392,7 +405,7 @@ impl<'a> Lexer<'a> {
         self.chars.next()
     }
 
-    fn next_is(&mut self, c: char) -> bool { self.next_char_predicate(|c| c == c).is_some() }
+    fn next_is(&mut self, ch: char) -> bool { self.next_char_predicate(|c| ch.eq(c)).is_some() }
 
     fn next_map<F, T>(&mut self, map: F) -> Option<T>
     where
@@ -467,7 +480,7 @@ impl<'a> Lexer<'a> {
     ///     println!("{:?}", token);
     /// }
     /// ```
-    fn scan(&mut self) -> crate::db_error::Result<(Option<Token>)> {
+    fn scan_token(&mut self) -> crate::db_error::Result<Option<Token>> {
         //1、跳过空白字符串
         self.skip_whitespace();
 
@@ -660,6 +673,13 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// 判断整个字符串是否全部由标识符组成
+fn is_identifier(input: &str) -> bool {
+    let mut lexer = Lexer::new(input);
+    let Some(Ok(Token::Identifier(_))) = lexer.next() else { return false; };
+    lexer.next().is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,7 +702,7 @@ mod tests {
     #[test]
     fn test_scan_string() -> crate::db_error::Result<()> {
         let mut lexer = Lexer::new("'hello'");
-        let result = lexer.scan()?;
+        let result = lexer.scan_token()?;
         println!("{:?}", result);
         Ok(())
     }
@@ -690,8 +710,46 @@ mod tests {
     #[test]
     fn test_scan_quoted() -> crate::db_error::Result<()> {
         let mut lexer = Lexer::new("\"hello\"");
-        let result = lexer.scan()?;
+        let result = lexer.scan_token()?;
         println!("{:?}", result);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lexer() -> crate::db_error::Result<()> {
+        let mut lexer = Lexer::new("select
+  t.*
+  from
+  (
+    select
+      id as id,
+      display_name as name,
+      biz_url as url,
+      type as bizType,
+      '2' as type,
+      'null' as html,
+      'null' as description,
+      updated_time as publish_time
+    from
+      tb_ct_biz
+    union
+    select
+      info.content_id as id,
+      title as name,
+      'null' as url,
+      'null' as bizType,
+      '1'  as type,
+      content as html,
+      tcp.cover_description as description,
+      tcp.publish_time as publish_time
+    from
+      tb_ct_info info
+      inner join  tb_ct_publish tcp on info.content_id = tcp.content_id
+    where tcp.state = '5' ) t
+  order by match_score desc,t.publish_time desc,t.html desc;");
+        while let Some(token) = lexer.scan_token()? {
+            println!("{:?}", token);
+        }
         Ok(())
     }
 }
