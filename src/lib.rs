@@ -5,6 +5,7 @@ pub mod utils;
 pub use storage::BitCask;
 
 mod sql;
+mod types;
 
 pub fn init_tracing() {
     tracing_subscriber::fmt()
