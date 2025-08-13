@@ -485,6 +485,7 @@ impl<'a> Lexer<'a> {
         self.skip_whitespace();
 
         //2、读取下一个元素，注意这里通过peek去借用
+        // dbg!(self.chars.peek());
         let Some(c) = self.chars.peek() else {
             return Ok(None);
         };
@@ -640,10 +641,8 @@ impl<'a> Lexer<'a> {
     fn scan_number(&mut self) -> Option<Token> {
         // 扫描整数部分
         let mut number = self.next_char_predicate(|e| e.is_ascii_digit())?.to_string();
-        while let Some(c) = self.chars.next() {
-            if c.is_ascii_digit() {
-                number.push(c);
-            }
+        while let Some(c) = self.next_char_predicate(|e| e.is_ascii_digit()) {
+            number.push(c);
         }
         // 扫描小数部分
         if self.next_is('.') {
@@ -657,11 +656,11 @@ impl<'a> Lexer<'a> {
         // 扫描指数类型
         if let Some(exp) = self.next_char_predicate(|c| 'e'.eq(c) || 'E'.eq(c)) {
             number.push(exp);
-            if let Some(c) = self.next_char_predicate(|c| '+'.eq(c) || '-'.eq(c)) {
-                number.push(c);
+            if let Some(sign) = self.next_char_predicate(|c| '+'.eq(c) || '-'.eq(c)) {
+                number.push(sign);
             }
-            while let Some(c) = self.next_char_predicate(|c| c.is_ascii_digit()) {
-                number.push(c);
+            while let Some(ch) = self.next_char_predicate(|c| c.is_ascii_digit()) {
+                number.push(ch);
             }
         }
         Some(Token::Number(number))
@@ -683,6 +682,7 @@ fn is_identifier(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::parser::lexer::Token::Number;
     #[test]
     fn test_lexer_create() {
         let lexer = Lexer::new("create table test;");
@@ -726,7 +726,7 @@ mod tests {
       display_name as name,
       biz_url as url,
       type as bizType,
-      '2' as type,
+      2 as type,
       'null' as html,
       'null' as description,
       updated_time as publish_time
@@ -738,16 +738,19 @@ mod tests {
       title as name,
       'null' as url,
       'null' as bizType,
-      '1'  as type,
+       1  as type,
       content as html,
       tcp.cover_description as description,
       tcp.publish_time as publish_time
     from
       tb_ct_info info
       inner join  tb_ct_publish tcp on info.content_id = tcp.content_id
-    where tcp.state = '5' ) t
+    where tcp.state = 5 ) t
   order by match_score desc,t.publish_time desc,t.html desc;");
         while let Some(token) = lexer.scan_token()? {
+            if token.eq(&Number("5".to_string())) {
+                println!("break");
+            }
             println!("{:?}", token);
         }
         Ok(())
