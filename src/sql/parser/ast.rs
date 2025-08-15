@@ -1,5 +1,10 @@
 use crate::types::DataType;
+use serde::de::Visitor;
 use std::collections::BTreeMap;
+use std::hash::Hash;
+use std::ops::Mul;
+
+#[derive(Debug)]
 pub enum Statement {
     /// BEGIN: 开启一个新事务
     /// - read_only: 只读标记
@@ -68,10 +73,18 @@ pub enum Statement {
     /// - limit: 返回的总条数
     Select {
         select: Vec<(Expression, Option<String>)>,
+        from: Vec<From>,
+        r#where: Option<Expression>,
+        group_by: Vec<Expression>,
+        having: Option<Expression>,
+        order_by: Vec<(Expression, Direction)>,
+        offset: Option<Expression>,
+        limit: Option<Expression>,
     },
 }
 
 /// From语句
+#[derive(Debug)]
 pub enum From {
     /// 表信息
     Table {
@@ -95,6 +108,26 @@ pub enum JoinType {
     Inner,
     Left,
     Right,
+}
+
+impl JoinType {
+    /// 内外连接判断函数
+    /// - cross | inner => false
+    /// - left | right => true
+    pub fn is_outer(&self) -> bool {
+        match self {
+            JoinType::Cross | JoinType::Inner => false,
+            JoinType::Left | JoinType::Right => true
+        }
+    }
+}
+
+/// 升降序
+#[derive(Debug, Default)]
+pub enum Direction {
+    #[default]
+    Asc,
+    Desc,
 }
 
 /// 表示 `CREATE TABLE` 语句中的列定义。
@@ -130,6 +163,7 @@ pub enum JoinType {
 ///
 /// - `references`
 ///   外键引用的表名，如果没有外键约束则为 `None`。
+#[derive(Debug)]
 pub struct Column {
     pub name: String,
     pub datatype: DataType,
@@ -164,6 +198,7 @@ pub struct Column {
 ///
 /// - `Operator(Operator)`
 ///   运算符表达式（如 `+`、`-`、`>` 等），可与其它表达式组合形成更复杂的逻辑或算术运算。
+#[derive(Debug, Clone)]
 pub enum Expression {
     /// 所有列
     All,
@@ -179,6 +214,7 @@ pub enum Expression {
 
 
 /// 表达式的字面常量
+#[derive(Debug, Clone)]
 pub enum Literal {
     Null,
     Boolean(bool),
@@ -187,13 +223,40 @@ pub enum Literal {
     Float(f64),
 }
 
+impl PartialEq for Literal {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Literal::Null, Literal::Null) => true,
+            (Literal::Boolean(a), Literal::Boolean(b)) => a == b,
+            (Literal::String(a), Literal::String(b)) => a == b,
+            (Literal::Integer(a), Literal::Integer(b)) => a == b,
+            (Literal::Float(a), Literal::Float(b)) => a.to_bits() == b.to_bits(), //使用to_bits来比较 是因为f64没有实现Eq特征，不具备完全等价的特性
+            _ => false
+        }
+    }
+}
+
+impl Eq for Literal {}
+
+impl Hash for Literal {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state); // 因为最终都是使用内部数据进行hash,所以如果不加这个处理，对于同样的内部数据可能会出现hash碰撞
+        match self {
+            Literal::Null => {}
+            Literal::Boolean(b) => b.hash(state),
+            Literal::String(s) => s.hash(state),
+            Literal::Integer(i) => i.hash(state),
+            Literal::Float(f) => f.to_bits().hash(state),
+        }
+    }
+}
+
 
 /// 表达式操作
+#[derive(Debug, Clone)]
 pub enum Operator {
     /// a and b
     And(Box<Expression>, Box<Expression>),
-    /// !a
-    Not(Box<Expression>),
     /// a OR b
     Or(Box<Expression>, Box<Expression>),
     /// a=b
@@ -216,18 +279,255 @@ pub enum Operator {
     Div(Box<Expression>, Box<Expression>),
     /// a ^ b
     Exp(Box<Expression>, Box<Expression>),
-    /// a!
-    Factor(Box<Expression>, Box<Expression>),
-    /// +a
-    Identifier(Box<Expression>),
     /// a*b
     Multiply(Box<Expression>, Box<Expression>),
-    /// -a
-    Negate(Box<Expression>),
     /// a%b
-    Remainder(Box<Expression>),
+    Remainder(Box<Expression>, Box<Expression>),
     /// a-b
     Sub(Box<Expression>, Box<Expression>),
     /// a like b
     Like(Box<Expression>, Box<Expression>),
+    /// !a
+    Not(Box<Expression>),
+    /// a!
+    Factor(Box<Expression>),
+    /// +a
+    Identifier(Box<Expression>),
+    /// -a
+    Negate(Box<Expression>),
+}
+
+impl Expression {
+    /// 深度优先遍历（DFS）当前表达式树，并对每个节点调用提供的闭包。
+    ///
+    /// 遍历过程中会将当前节点的引用传递给 `visitor` 闭包，
+    /// 若闭包返回 `false`，则会**立即终止遍历**并返回 `false`；
+    /// 若遍历完整棵树且未中途终止，则返回 `true`。
+    ///
+    /// # 参数
+    /// - `visitor`
+    ///   一个可变闭包，签名为 `FnMut(&Expression) -> bool`：
+    ///   * 参数为当前访问到的表达式节点引用；
+    ///   * 返回 `true` 继续遍历子节点，返回 `false` 停止遍历。
+    ///
+    /// # 返回值
+    /// - `true`：已遍历完整棵表达式树；
+    /// - `false`：闭包返回了 `false`，提前中止。
+    ///
+    /// # 遍历规则
+    /// - 对于二元运算符（如 `+`、`-`、`>` 等），会依次递归遍历左右子表达式。
+    /// - 对于一元运算符（如取反 `-`、逻辑非 `NOT`、阶乘等），递归遍历其唯一子表达式。
+    /// - 对于函数调用，会遍历函数的全部参数表达式。
+    /// - 对于 `All`（`*`）、`Column`、`Literal` 等叶子节点，不会继续向下遍历。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// // 打印表达式树中所有节点
+    /// expr.walk(&mut |node| {
+    ///     println!("{:?}", node);
+    ///     true // 返回 true 继续遍历
+    /// });
+    /// ```
+
+    pub fn walk(&self, visitor: &mut impl FnMut(&Expression) -> bool) -> bool {
+        use Operator::*;
+        // 递归提前终止条件
+        // 如果当前表达式，在传入的闭包结果已经是false,则没必要拆解多个表达式放到闭包函数中执行
+        if !visitor(self) {
+            return false;
+        }
+        match self {
+            Self::Operator(op) => match op {
+                Add(left, right)
+                | Div(left, right)
+                | Exp(left, right)
+                | Sub(left, right)
+                | Like(left, right)
+                | NotEq(left, right)
+                | And(left, right)
+                | Or(left, right)
+                | Eq(left, right)
+                | Greater(left, right)
+                | GreaterEq(left, right)
+                | Less(left, right)
+                | LessEq(left, right)
+                | Multiply(left, right)
+                | Remainder(left, right)
+                => left.walk(visitor) && right.walk(visitor),
+                Factor(expr)
+                | Identifier(expr)
+                | Negate(expr)
+                | Not(expr)
+                | IS(expr, _)
+                => expr.walk(visitor),
+            },
+            Expression::Function(_, expresses) => expresses.iter().any(|expr| expr.walk(visitor)),
+            Expression::All
+            | Expression::Column(_, _)
+            | Expression::Literal(_) => true
+        }
+    }
+
+    /// 检查当前表达式树中是否存在满足条件的节点。
+    ///
+    /// 该方法会对表达式树执行深度优先遍历（基于 [`walk`](#method.walk)），
+    /// 并在遍历过程中将每个节点传递给提供的 `visitor` 闭包进行检测。
+    ///
+    /// 一旦 `visitor` 对任意节点返回 `true`，`contains` 会立即返回 `true`，
+    /// 不再继续遍历；如果遍历完整棵树都未命中条件，则返回 `false`。
+    ///
+    /// # 参数
+    /// - `visitor`
+    ///   判定闭包，类型为 `&impl Fn(&Expression) -> bool`：
+    ///   * 参数：当前访问到的表达式节点引用；
+    ///   * 返回值：是否命中条件（`true` 表示找到目标）。
+    ///
+    /// # 返回值
+    /// - `true`：表达式树中存在至少一个满足条件的节点；
+    /// - `false`：未找到符合条件的节点。
+    ///
+    /// # 实现细节
+    /// 内部通过调用 [`walk`](#method.walk) 实现：
+    /// - 将 `visitor` 包装成反逻辑闭包传给 `walk`，使得 `walk` 在 `visitor` 返回 `true`
+    ///   时立即终止（通过 `walk` 的“提前退出”机制）。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// // 判断表达式中是否包含任何列引用
+    /// let has_column = expr.contains(&|node| matches!(node, Expression::Column(_, _)));
+    /// assert!(has_column);
+    /// ```
+
+    pub fn contains(&self, visitor: impl Fn(&Expression) -> bool) -> bool {
+        !self.walk(&mut |expr| !visitor(expr))
+    }
+
+    pub fn collect(&self, visitor: &impl Fn(&Expression) -> bool, expresses: &mut Vec<Expression>) {
+        use Operator::*;
+
+        if !visitor(self) {
+            expresses.push(self.clone());
+            return;
+        }
+        match self {
+            Self::Operator(op) => match op {
+                Add(left, right)
+                | Div(left, right)
+                | Exp(left, right)
+                | Sub(left, right)
+                | Like(left, right)
+                | NotEq(left, right)
+                | And(left, right)
+                | Or(left, right)
+                | Eq(left, right)
+                | Greater(left, right)
+                | GreaterEq(left, right)
+                | Less(left, right)
+                | LessEq(left, right)
+                | Multiply(left, right)
+                | Remainder(left, right)
+                => {
+                    left.collect(visitor, expresses);
+                    right.collect(visitor, expresses);
+                }
+                Factor(expr)
+                | Identifier(expr)
+                | Negate(expr)
+                | Not(expr)
+                | IS(expr, _)
+                => expr.collect(visitor, expresses),
+            },
+            Expression::Function(_, args) => args.iter().for_each(|expr| expr.collect(visitor, expresses)),
+            Expression::All
+            | Expression::Column(_, _)
+            | Expression::Literal(_) => {}
+        }
+    }
+}
+
+impl core::convert::From<Literal> for Expression {
+    fn from(literal: Literal) -> Self {
+        Self::Literal(literal)
+    }
+}
+
+impl core::convert::From<Operator> for Expression {
+    fn from(operator: Operator) -> Self {
+        Self::Operator(operator)
+    }
+}
+
+impl core::convert::From<Operator> for Box<Expression> {
+    fn from(operator: Operator) -> Self {
+        Box::new(operator.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::mem;
+
+    #[test]
+    #[ignore]
+    fn f64_eq_test() {
+        let a = f64::NAN;
+        let b = f64::NAN;
+        assert_ne!(a, b); // a!=b 因为f64没有实现Eq所以不具备完全等价的特性
+    }
+
+    #[test]
+    #[ignore]
+    fn discriminants_test() {
+        #[derive(Debug)]
+        enum Shape {
+            Circle(u64),
+            Rectangle { w: u64, h: u64 },
+        }
+
+        let a = Shape::Circle(1);
+        let b = Shape::Circle(2);
+        let c = Shape::Rectangle { w: 3, h: 4 };
+
+        // 打印 discriminant 值
+        println!("{:?}", core::mem::discriminant(&a));
+        println!("{:?}", core::mem::discriminant(&b));
+        println!("{:?}", core::mem::discriminant(&c));
+
+        // 比较 discriminant
+        println!("a 与 b 变体相同吗? {}", core::mem::discriminant(&a) == core::mem::discriminant(&b));
+        println!("a 与 c 变体相同吗? {}", core::mem::discriminant(&a) == core::mem::discriminant(&c));
+    }
+
+    #[test]
+    #[ignore]
+    fn discriminants_test_2() {
+        #[derive(Debug)]
+        enum Value {
+            Int(i32),
+            Float(f64),
+        }
+
+        impl Hash for Value {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                mem::discriminant(self).hash(state);
+                match self {
+                    Value::Int(v) => v.hash(state),
+                    Value::Float(v) => v.to_bits().hash(state),
+                }
+            }
+        }
+
+        let x = Value::Int(42);
+        let y = Value::Float(42.0);
+
+        let mut hx = DefaultHasher::new();
+        x.hash(&mut hx);
+
+        let mut hy = DefaultHasher::new();
+        y.hash(&mut hy);
+
+        println!("hash(x) = {}", hx.finish());
+        println!("hash(y) = {}", hy.finish());
+    }
 }
