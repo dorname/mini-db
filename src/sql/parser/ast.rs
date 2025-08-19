@@ -266,7 +266,7 @@ pub enum Operator {
     /// a >= b
     GreaterEq(Box<Expression>, Box<Expression>),
     /// is null or is true ...
-    IS(Box<Expression>, Literal),
+    Is(Box<Expression>, Literal),
     /// a < b
     Less(Box<Expression>, Box<Expression>),
     /// a <= b
@@ -358,7 +358,7 @@ impl Expression {
                 | Identifier(expr)
                 | Negate(expr)
                 | Not(expr)
-                | IS(expr, _)
+                | Is(expr, _)
                 => expr.walk(visitor),
             },
             Expression::Function(_, expresses) => expresses.iter().any(|expr| expr.walk(visitor)),
@@ -434,7 +434,7 @@ impl Expression {
                 | Identifier(expr)
                 | Negate(expr)
                 | Not(expr)
-                | IS(expr, _)
+                | Is(expr, _)
                 => expr.collect(visitor, expresses),
             },
             Expression::Function(_, args) => args.iter().for_each(|expr| expr.collect(visitor, expresses)),
