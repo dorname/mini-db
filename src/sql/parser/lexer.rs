@@ -682,7 +682,6 @@ fn is_identifier(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::parser::lexer::Token::Number;
     #[test]
     fn test_lexer_create() {
         let lexer = Lexer::new("create table test;");
@@ -747,12 +746,11 @@ mod tests {
       inner join  tb_ct_publish tcp on info.content_id = tcp.content_id
     where tcp.state = 5 ) t
   order by match_score desc,t.publish_time desc,t.html desc;");
+        let mut tokens = Vec::<String>::new();
         while let Some(token) = lexer.scan_token()? {
-            if token.eq(&Number("5".to_string())) {
-                println!("break");
-            }
-            println!("{:?}", token);
+            tokens.push(token.to_string());
         }
+        println!("{:?}", tokens.join(" "));
         Ok(())
     }
 }

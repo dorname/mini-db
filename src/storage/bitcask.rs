@@ -471,16 +471,18 @@ struct Log {
 }
 
 /// 实现一个日志文件条目结构体
-/// crc 完整性验证字段 256位的hash编码 => Vec<u8> 长度 32
-/// tstamp 时间戳 32位的时间戳 => Vec<u8> 长度 4
-/// ksz key的长度 根据键值定
-/// value_sz value的长度 根据value值定
-/// key 键 Vec<u8>
-/// value 值 Vec<u8>
+/// - crc 完整性验证字段 256位的hash编码 => Vec<u8> 长度 32
+/// - tstamp 时间戳 32位的时间戳 => Vec<u8> 长度 4
+/// - ksz key的长度 根据键值定
+/// - value_sz value的长度 根据value值定
+/// - key 键 Vec<u8>
+/// - value 值 Vec<u8>
 /// 拼接方式：
+/// ```text
 /// ------|------|------|---------|------|------|
 ///  crc  |tstamp|ksz   |value_sz |key   |value |
 /// ------|------|------|---------|------|------|
+/// ```
 #[derive(Debug)]
 pub(super) struct LogEntry {
     crc: Vec<u8>,

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
-use std::num::ParseIntError;
+use std::num::{ParseFloatError, ParseIntError};
 use std::string::FromUtf8Error;
 use std::sync::PoisonError;
 /// 自定义错误信息
@@ -39,7 +39,7 @@ pub enum Error {
     /// 输入错误
     UnExpectedInput(String),
     /// String => Int错误
-    ParseIntError(String),
+    ParseError(String),
 }
 
 /// 自定义错误类型
@@ -117,7 +117,7 @@ impl Display for Error {
             Error::DeserializationError(msg) => write!(f, "error:Deserialization error:{msg}"),
             Error::PoisonError(msg) => write!(f, "error:PoisonError error:{msg}"),
             Error::UnExpectedInput(msg) => write!(f, "error:unexpectedInput:{msg}"),
-            Error::ParseIntError(msg) => write!(f, "error:parseIntError:{msg}"),
+            Error::ParseError(msg) => write!(f, "error:ParseError:{msg}"),
         }
     }
 }
@@ -207,8 +207,15 @@ impl<T> From<PoisonError<T>> for Error {
 
 impl From<ParseIntError> for Error {
     fn from(value: ParseIntError) -> Self {
-        Self::ParseIntError(value.to_string())
+        Self::ParseError(value.to_string())
     }
+}
+
+impl From<ParseFloatError> for Error {
+    fn from(value: ParseFloatError) -> Self {
+        Self::ParseError(value.to_string())
+    }
+    
 }
 #[cfg(test)]
 mod tests {

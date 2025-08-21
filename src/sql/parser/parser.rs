@@ -2,6 +2,7 @@ use super::ast::{Column, Expression, Literal, Statement};
 use crate::db_error::Result;
 use crate::errinput;
 use crate::sql::parser::ast;
+use crate::sql::parser::ast::Literal::Null;
 use crate::sql::parser::lexer::{Keyword, Lexer, Token};
 use crate::types::DataType;
 use std::iter::Peekable;
@@ -139,11 +140,12 @@ impl<'a> Parser<'a> {
         let Some(token) = self.peek()?else {
             return errinput!("Unexpected None token");
         };
-        // match token {
-        //     Token::Keyword(Keyword::Begin) => self.parse_begin(),
-        //     token => errinput!("Unexpected token{:?}",token),
-        // }
-        todo!()
+        match token {
+            Token::Keyword(Keyword::Begin) => self.parse_begin(),
+            Token::Keyword(Keyword::Commit) => self.parse_commit(),
+            Token::Keyword(Keyword::Create) => self.parse_create_table(),
+            _ => return errinput!("Unexpected token{:?}",token),
+        }
     }
 
     /// 解析 SQL `BEGIN` 语句，并返回对应的 [`ast::Statement::Begin`] 节点。
@@ -322,7 +324,6 @@ impl<'a> Parser<'a> {
 
     /// 使用“优先级爬升算法（precedence climbing algorithm）”解析表达式。参考：
     ///
-    /// <https://zh.wikipedia.org/wiki/运算符优先级解析#优先级爬升法>
     /// <https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing>
     ///
     /// 表达式主要由两类元素组成：
@@ -420,47 +421,406 @@ impl<'a> Parser<'a> {
         self.parse_expression_at(0)
     }
 
-    /// 在给定的最小优先级下解析一个表达式。
+    /// 以给定的最小优先级解析一个表达式。
     ///
-    /// 该函数会根据“优先级爬升算法”递归地解析表达式，处理前缀运算符、
-    /// 原子表达式、中缀运算符和后缀运算符。其核心规则是：
+    /// 该函数实现了 **优先级爬升算法（precedence climbing）**，用于解析复杂表达式，
+    /// 支持以下几类运算符：
+    /// - **前缀运算符**（例如：`-x`、`NOT x`）
+    /// - **后缀运算符**（例如：`x!`、`x IS NULL`）
+    /// - **中缀（二元）运算符**（例如：`x + y`、`x AND y`）
     ///
-    /// 1. **前缀运算符**
-    ///    - 如果左操作数是前缀运算符，则递归解析其右操作数，并根据前缀运算符的
-    ///      优先级与结合律决定递归深度。
-    ///    - 否则，将左操作数解析为原子（数值、变量、函数、括号表达式等）。
+    /// # 算法流程
     ///
-    /// 2. **后缀运算符（第一阶段）**
-    ///    - 如果存在后缀运算符（例如 `!`、`IS NULL`），立即作用在当前左操作数上。
+    /// 1. **初始化左操作数 (LHS)**
+    ///    - 如果当前位置是 **前缀运算符**，则递归解析其右操作数，
+    ///      并将结果与前缀运算符组合为一个新表达式。
+    ///    - 否则，将当前位置解析为一个原子表达式（字面量、标识符、括号表达式等）。
     ///
-    /// 3. **中缀运算符**
-    ///    - 只要下一个中缀运算符的优先级大于等于当前的最小优先级，就会继续解析。
-    ///    - 对右操作数递归调用本函数，并传入新的最小优先级（由运算符的优先级和结合律决定）。
-    ///    - 最终将中缀运算符应用到左、右操作数上，形成新的表达式。
+    /// 2. **应用后缀运算符**
+    ///    - 如果在左操作数后紧跟着后缀运算符（例如 `x!`），则依次应用它们。
     ///
-    /// 4. **后缀运算符（第二阶段）**
-    ///    - 在处理完一个中缀运算符及其右操作数后，还需要再次检查是否存在后缀运算符，
-    ///      并将其应用到当前表达式上。例如：`1 + NULL IS NULL`。
+    /// 3. **应用中缀运算符**
+    ///    - 当下一个运算符的优先级 **大于等于** 当前的 `min_precedence` 时：
+    ///      - 取出该运算符。
+    ///      - 递归解析其右操作数 (RHS)，并传入更新后的优先级。
+    ///      - 将 LHS、运算符 和 RHS 组合为新的表达式。
     ///
-    /// 算法会持续递归，直到遇到优先级更低的运算符为止，
-    /// 然后返回当前解析完成的子表达式。
+    /// 4. **处理最终的后缀运算符**
+    ///    - 在中缀运算符之后，表达式末尾仍可能跟随后缀运算符（例如：`1 + NULL IS NULL`），
+    ///      此时需要再次应用这些后缀运算符。
+    ///
+    /// # 参数
+    ///
+    /// * `min_precedence` - 当前解析所允许的最小运算符优先级。
+    ///   用于控制运算符的结合顺序，保证解析结果符合优先级和结合律规则。
+    ///
+    /// # 返回值
+    ///
+    /// 返回一个 [`ast::Expression`]，表示完整的抽象语法树表达式。
+    /// 如果输入非法，则返回错误。
+    ///
+    /// # 可能的错误
+    ///
+    /// - 语法无效（例如缺少操作数或多余的符号）；
+    /// - 表达式不完整；
+    /// - 出现了不期望的 Token。
+    ///
+    /// # 示例
+    ///
+    /// ```sql
+    /// -- SQL 风格示例
+    /// 1 + 2 * 3
+    /// -- 会被解析为 (1 + (2 * 3))，遵循运算符优先级
+    /// ```
+    ///
+    /// ```text
+    /// // 假设 `parser` 已经初始化并装载了 "1 + 2 * 3" 的 Token
+    /// let expr = parser.parse_expression_at(0)?;
+    /// assert_eq!(expr.to_string(), "1 + (2 * 3)");
+    /// ```
     fn parse_expression_at(&mut self, min_precedence: Precedence) -> Result<Expression> {
-        todo!()
+        //1
+        let mut lhs = if let Some(prefix_op) = self.parse_prefix_op_at(min_precedence) {
+            // 前缀运算符=>右结合
+            let next_precedence = prefix_op.precedence() + prefix_op.associativity();
+            // 递归处理右边的表达式
+            let rhs = self.parse_expression_at(next_precedence)?;
+            // 返回最终的表达式
+            prefix_op.into_expression(rhs)
+        } else {
+            // 字面常量/标识符/括号表达式
+            self.parse_expression_atom()?
+        };
+        //2
+        while let Some(postfix_op) = self.parse_postfix_op_at(min_precedence)? {
+            lhs = postfix_op.into_expression(lhs)
+        }
+        //3
+        while let Some(min_op) = self.parse_mid_op_at(min_precedence) {
+            let next_precedence = min_op.precedence() + min_op.associativity();
+            let rhs = self.parse_expression_at(next_precedence)?;
+            lhs = min_op.into_expression(lhs, rhs)
+        }
+
+        //4
+        while let Some(postfix_op) = self.parse_postfix_op_at(min_precedence)? {
+            lhs = postfix_op.into_expression(lhs)
+        }
+
+        Ok(lhs)
     }
 
-    fn parse_prefix_op_at(&mut self, min_precedence: Precedence) -> Result<Expression> {
-        todo!()
-    }
-    fn parse_expression_atom() -> Result<Expression> {
-        todo!()
+    /// 尝试解析一个**前缀运算符 (prefix operator)**。
+    ///
+    /// 当前缀运算符存在，且其优先级大于等于 `min_precedence` 时，
+    /// 本方法会返回对应的 [`PrefixOp`]，否则返回 `None`。
+    ///
+    /// 支持的前缀运算符包括：
+    /// - `NOT`：逻辑取反
+    /// - `-`：算术取负（例如 `-5`）
+    /// - `+`：算术取正（通常不改变数值，例如 `+5`）
+    ///
+    /// # 参数
+    ///
+    /// * `min_precedence` - 最小运算符优先级，只有当前缀运算符的优先级
+    ///   大于或等于该值时，才会被接受。
+    ///
+    /// # 返回值
+    ///
+    /// - 如果成功匹配到前缀运算符，并且其优先级符合要求，返回 `Some(PrefixOp)`。
+    /// - 如果当前位置不是前缀运算符，或其优先级过低，返回 `None`。
+    ///
+    /// # 示例
+    ///
+    /// ```sql
+    /// -- SQL 片段
+    /// NOT TRUE   -- 匹配到前缀运算符 NOT
+    /// -123       -- 匹配到前缀运算符 -
+    /// +456       -- 匹配到前缀运算符 +
+    /// ```
+    ///
+    /// ```text
+    /// // 假设输入 Token 为 "-5"
+    /// if let Some(op) = parser.parse_prefix_operator_at(0) {
+    ///     assert_eq!(op, PrefixOp::Minus);
+    /// }
+    /// ```
+    fn parse_prefix_op_at(&mut self, min_precedence: Precedence) -> Option<PrefixOp> {
+        self.next_if_map(|token| {
+            let op = match token {
+                Token::Keyword(Keyword::Not) => PrefixOp::Not,
+                Token::Minus => PrefixOp::Minus,
+                Token::Plus => PrefixOp::Plus,
+                _ => return None,
+            };
+            Some(op).filter(|o| o.precedence() >= min_precedence)
+        })
     }
 
-    fn parse_postfix_op_at(&mut self, min_precedence: Precedence) -> Result<Expression> {
-        todo!()
+    /// 解析一个**原子表达式 (expression atom)**。
+    ///
+    /// 原子表达式是表达式的最小单元，本方法支持以下几类：
+    ///
+    /// * **字面量值**
+    ///   - 整数：`123`
+    ///   - 浮点数：`3.14`
+    ///   - 字符串：`'hello'`
+    ///   - 布尔值：`TRUE` / `FALSE`
+    ///   - 特殊值：`NULL`、`NaN`、`Infinity`
+    ///
+    /// * **列名**
+    ///   - 未限定列名：`column`
+    ///   - 限定列名：`table.column`
+    ///
+    /// * **函数调用**
+    ///   - 格式：`func(arg1, arg2, ...)`
+    ///   - 通过识别 `标识符 + 左括号` 来判断是否为函数调用。
+    ///
+    /// * **括号括起的表达式**
+    ///   - 格式：`(expr)`
+    ///   - 用于调整优先级或构建子表达式。
+    ///
+    /// * **特殊符号**
+    ///   - 星号 `*`：表示所有列（例如 `SELECT *`）。
+    ///
+    /// # 返回值
+    ///
+    /// 成功时返回一个 [`ast::Expression`]，表示已解析的原子表达式。
+    ///
+    /// # 错误
+    ///
+    /// - 如果遇到的 Token 不符合任何原子表达式规则，会返回语法错误。
+    /// - 如果括号未正确闭合，或函数调用参数列表有语法错误，也会报错。
+    ///
+    /// # 示例
+    ///
+    /// ```sql
+    /// -- 以下 SQL 片段中的原子表达式
+    /// 123               -- 整数字面量
+    /// 'hello'           -- 字符串字面量
+    /// TRUE              -- 布尔字面量
+    /// col1              -- 列名
+    /// t.col2            -- 限定列名
+    /// ABS(-5)           -- 函数调用
+    /// (1 + 2)           -- 括号表达式
+    /// *                 -- 所有列
+    /// ```
+    ///
+    /// ```text
+    /// // 假设 parser 输入了 "ABS(1)"
+    /// let expr = parser.parse_expression_atom()?;
+    /// assert_eq!(expr.to_string(), "ABS(1)");
+    /// ```
+    fn parse_expression_atom(&mut self) -> Result<Expression> {
+        Ok(
+            match self.next()? {
+                // *
+                Token::Asterisk => Expression::All,
+
+                // 常量
+                Token::Number(number) if number.chars().all(|c| c.is_ascii_digit()) => {
+                    Literal::Integer(number.parse()?).into()
+                }
+
+                // 浮点数
+                Token::Number(num) => Literal::Float(num.parse()?).into(),
+                // 字符串
+                Token::String(string) => Literal::String(string).into(),
+                // 关键字
+                Token::Keyword(Keyword::True) => Literal::Boolean(true).into(),
+                Token::Keyword(Keyword::False) => Literal::Boolean(false).into(),
+                Token::Keyword(Keyword::Infinity) => Literal::Float(f64::INFINITY).into(),
+                Token::Keyword(Keyword::NaN) => Literal::Float(f64::NAN).into(),
+                Token::Keyword(Keyword::Null) => Literal::Null.into(),
+
+                //函数调用
+                Token::Identifier(name) if self.next_is(Token::OpenParen) => {
+                    let mut args = Vec::new();;
+                    while !self.next_is(Token::CloseParen) {
+                        if !args.is_empty() {
+                            self.expect(Token::Comma)?;
+                        }
+                        args.push(self.parse_expression()?);
+                    }
+                    Expression::Function(name, args)
+                }
+
+                //限定列名
+                Token::Identifier(table_name) if self.next_is(Token::Period) => {
+                    Expression::Column(Some(table_name), self.next_ident()?)
+                }
+
+                //普通列名
+                Token::Identifier(column) => {
+                    Expression::Column(None, column)
+                }
+
+                //括号表达式
+                Token::OpenParen => {
+                    let expr = self.parse_expression()?;
+                    self.expect(Token::CloseParen)?;
+                    expr
+                }
+                token => return errinput!("unexpected token {:?}",token),
+            }
+        )
     }
 
-    fn parse_mid_op_at(&mut self, min_precedence: Precedence) -> Result<Expression> {
-        todo!()
+    /// 尝试解析一个**后缀运算符 (postfix operator)**。
+    ///
+    /// 当当前位置的 Token 构成一个合法的后缀运算符，并且其优先级
+    /// 大于等于 `min_precedence` 时，返回对应的 [`PostfixOp`]。
+    /// 否则返回 `None`。
+    ///
+    /// 支持的后缀运算符包括：
+    /// - **IS [NOT] NULL**：判空运算，例如：`expr IS NULL`、`expr IS NOT NULL`
+    /// - **IS [NOT] NaN**：判 NaN 运算，例如：`expr IS NaN`、`expr IS NOT NaN`
+    /// - **阶乘运算符 `!`**：例如 `5!`
+    ///
+    /// # 特殊说明
+    ///
+    /// - `IS NULL` / `IS NOT NULL` / `IS NaN` / `IS NOT NaN` 由多个 Token 组成，
+    ///   需要特殊处理。
+    /// - 为了保证语法正确，只有在运算符的优先级满足 `min_precedence`
+    ///   要求时才会真正消费 Token。
+    ///
+    /// # 参数
+    ///
+    /// * `min_precedence` - 最小运算符优先级，控制运算符是否可以被解析。
+    ///
+    /// # 返回值
+    ///
+    /// * `Ok(Some(PostfixOp))` - 成功解析到合法的后缀运算符。
+    /// * `Ok(None)` - 没有匹配到后缀运算符，或其优先级过低。
+    /// * `Err(..)` - 输入 Token 不符合预期，导致语法错误。
+    ///
+    /// # 示例
+    ///
+    /// ```sql
+    /// -- SQL 片段
+    /// col IS NULL        -- 匹配 PostfixOp::Is(Null)
+    /// col IS NOT NULL    -- 匹配 PostfixOp::IsNot(Null)
+    /// col IS NaN         -- 匹配 PostfixOp::Is(NaN)
+    /// col IS NOT NaN     -- 匹配 PostfixOp::IsNot(NaN)
+    /// 5!                 -- 匹配 PostfixOp::Factor
+    /// ```
+    ///
+    /// ```text
+    /// // 假设输入 Token 为 "value IS NULL"
+    /// let op = parser.parse_postfix_operator_at(0)?.unwrap();
+    /// assert_eq!(op, PostfixOp::Is(ast::Literal::Null));
+    /// ```
+    fn parse_postfix_op_at(&mut self, min_precedence: Precedence) -> Result<Option<PostfixOp>> {
+        // 如果下一个词法单元是Is
+        if self.peek()? == Some(&Token::Keyword(Keyword::Is)) {
+            // 判断Is语法的优先级是否大于当前的优先级注意：is null/is nan/is not null/is not nan的优先级大小都是一致的选一个出来比较就行了
+            if PostfixOp::Is(Null).precedence() < min_precedence {
+                return Ok(None);
+            }
+            self.expect(Keyword::Is.into())?; // 消费is移动到下一个token
+            // 判断下一个词法单元是不是not
+            let not = self.next_is(Token::Keyword(Keyword::Not));
+            // 获取值 null/nan
+            let val = match self.next()? {
+                Token::Keyword(Keyword::Null) => Literal::Null,
+                Token::Keyword(Keyword::NaN) => Literal::Float(f64::NAN),
+                token => return errinput!("unexpected token {:?}",token),
+            };
+            let op = match not {
+                true => PostfixOp::IsNot(val),
+                false => PostfixOp::Is(val)
+            };
+            return Ok(Some(op));
+        }
+        Ok(self.next_if_map(|token| {
+            let op = match token {
+                Token::Exclamation => PostfixOp::Factor,
+                _ => return None
+            };
+            Some(op).filter(|o| o.precedence() >= min_precedence)
+        }))
+    }
+
+    /// 尝试解析一个**中缀运算符 (middle operator)**。
+    ///
+    /// 当当前位置的 Token 是合法的中缀运算符，且其优先级大于等于
+    /// `min_precedence` 时，返回对应的 [`MiddleOp`]；
+    /// 否则返回 `None`。
+    ///
+    /// 支持的中缀运算符包括：
+    ///
+    /// **算术运算符**
+    /// - `+` → 加法
+    /// - `-` → 减法
+    /// - `*` → 乘法
+    /// - `/` → 除法
+    /// - `%` → 取余
+    /// - `^` → 幂运算 (Exponentiate)
+    ///
+    /// **比较运算符**
+    /// - `=` → 等于
+    /// - `<>` / `!=` → 不等于
+    /// - `<` → 小于
+    /// - `<=` → 小于等于
+    /// - `>` → 大于
+    /// - `>=` → 大于等于
+    ///
+    /// **逻辑运算符**
+    /// - `AND`
+    /// - `OR`
+    ///
+    /// **模式匹配运算符**
+    /// - `LIKE`
+    ///
+    /// # 参数
+    ///
+    /// * `min_precedence` - 最小运算符优先级。
+    ///   只有当运算符的优先级大于等于该值时，才会被解析。
+    ///
+    /// # 返回值
+    ///
+    /// * `Some(MiddleOp)` - 成功解析到中缀运算符。
+    /// * `None` - 当前位置不是中缀运算符，或其优先级过低。
+    ///
+    /// # 示例
+    ///
+    /// ```sql
+    /// -- SQL 片段
+    /// a + b            -- 匹配加法运算符
+    /// x * y            -- 匹配乘法运算符
+    /// age >= 18        -- 匹配大于等于运算符
+    /// name LIKE 'A%'   -- 匹配 LIKE 运算符
+    /// flag AND status  -- 匹配 AND 运算符
+    /// ```
+    ///
+    /// ```text
+    /// // 假设输入 Token 为 "+"
+    /// if let Some(op) = parser.parse_infix_operator_at(0) {
+    ///     assert_eq!(op, InfixOperator::Add);
+    /// }
+    fn parse_mid_op_at(&mut self, min_precedence: Precedence) -> Option<MiddleOp> {
+        self.next_if_map(|token| {
+            let op = match token {
+                Token::Plus => MiddleOp::Add,
+                Token::Asterisk => MiddleOp::Multiply,
+                Token::Slash => MiddleOp::Divide,
+                Token::Equal => MiddleOp::Equal,
+                Token::NotEqual => MiddleOp::NotEqual,
+                Token::LessThan => MiddleOp::LessThan,
+                Token::GreaterThan => MiddleOp::GreaterThan,
+                Token::LessOrGreaterThan => MiddleOp::NotEqual,
+                Token::GreaterThanOrEqual => MiddleOp::GreaterThanEqual,
+                Token::LessThanOrEqual => MiddleOp::LessThanEqual,
+                Token::Keyword(Keyword::Like) => MiddleOp::Like,
+                Token::Keyword(Keyword::And) => MiddleOp::And,
+                Token::Keyword(Keyword::Or) => MiddleOp::Or,
+                Token::Minus => MiddleOp::Subtract,
+                Token::Percent => MiddleOp::Remainder,
+                Token::Caret => MiddleOp::Exponent,
+                _ => return None
+            };
+            Some(op).filter(|o| o.precedence() >= min_precedence)
+        })
     }
 }
 
@@ -489,7 +849,7 @@ impl Add<Associativity> for Precedence {
 
 /// 前缀操作
 /// 负号： -a
-/// 取反： not
+/// 取反： !a
 /// 正号： +a
 enum PrefixOp {
     Minus,
@@ -504,8 +864,9 @@ impl PrefixOp {
             Self::Not => 3,
         }
     }
+
     /// 闭合的时候都不需要提高执行优先级
-    fn associativity() -> Associativity {
+    fn associativity(&self) -> Associativity {
         Associativity::Right
     }
 
@@ -541,7 +902,7 @@ enum MiddleOp {
     And,
     Divide,
     Equal,
-    Exponent,
+    Exponent,  // a^b
     GreaterThan,
     GreaterThanEqual,
     LessThan,
@@ -572,6 +933,7 @@ impl MiddleOp {
 
     fn associativity(&self) -> Associativity {
         match self {
+            // 本次实现的运算符中只有幂运算^是右结合的
             Self::Exponent => Associativity::Right,
             _ => Associativity::Left,
         }
@@ -622,5 +984,29 @@ impl PostfixOp {
             Self::Is(v) => ast::Operator::Is(lhs, v).into(),
             Self::IsNot(v) => ast::Operator::Not(ast::Operator::Is(lhs, v).into()).into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::sql::parser::parser::Parser;
+
+    #[test]
+    fn parser_create_table() -> crate::db_error::Result<()> {
+        // 定义一个建表语句
+        let create_table = "create table ACT_RU_JOB (
+            ID_ varchar NOT NULL,
+            REV_ integer,
+            LOCK_EXP_TIME_ time NULL,
+            LOCK_OWNER_ varchar,
+            EXCLUSIVE_ boolean,
+            RETRIES_ integer,
+            TENANT_ID_ varchar default '',
+            primary key (ID_)
+        ) ";
+        // 创建语法分析器
+        let mut parser = Parser::new(create_table);
+        println!("{:?}", parser.parse_statement()?);
+        Ok(())
     }
 }
