@@ -1,4 +1,4 @@
-use super::ast::{Column, Expression, Literal, Statement};
+use super::ast::{Column, Direction, Expression, JoinType, Literal, Statement};
 use crate::db_error::Result;
 use crate::errinput;
 use crate::sql::parser::ast;
@@ -66,12 +66,20 @@ impl<'a> Parser<'a> {
     /// }
     /// ```
     fn next_predicate(&mut self, predicate: impl Fn(&Token) -> bool) -> Option<Token> {
-        self.peek().ok()?.filter(|token| predicate(token));
+        self.peek().ok()?.filter(|token| predicate(token))?;
         self.next().ok()
     }
 
     fn next_is(&mut self, token: Token) -> bool {
-        self.next_predicate(|tk| token.eq(tk)).is_some()
+        self.next_predicate(|tk| {
+            token.eq(tk)
+        }).is_some()
+    }
+
+    fn next_matches(&mut self, keywords: Vec<Keyword>) -> Option<Token> {
+        self.next_predicate(|tk| {
+            keywords.iter().any(|keyword| Token::Keyword(*keyword).eq(tk))
+        })
     }
 
     fn next_ident(&mut self) -> Result<String> {
@@ -141,10 +149,14 @@ impl<'a> Parser<'a> {
             return errinput!("Unexpected None token");
         };
         match token {
+            // 事务
             Token::Keyword(Keyword::Begin) => self.parse_begin(),
             Token::Keyword(Keyword::Commit) => self.parse_commit(),
+            Token::Keyword(Keyword::Rollback) => self.parse_rollback(),
+            Token::Keyword(Keyword::Explain) => self.parse_explain(),
+            // 表操作
             Token::Keyword(Keyword::Create) => self.parse_create_table(),
-            _ => return errinput!("Unexpected token{:?}",token),
+            _ => errinput!("Unexpected token{:?}",token),
         }
     }
 
@@ -260,7 +272,8 @@ impl<'a> Parser<'a> {
         let mut columns: Vec<_> = Vec::<Column>::new();
         loop {
             columns.push(self.parse_create_table_columns()?);
-            if !self.next_is(Token::Comma) {
+            let flag = self.next_is(Token::Comma);
+            if !flag {
                 break;
             }
         }
@@ -322,6 +335,201 @@ impl<'a> Parser<'a> {
         Ok(column)
     }
 
+    /// 解析 `DROP TABLE` SQL 语句。
+    ///
+    /// # 语法
+    ///
+    /// ```sql
+    /// DROP TABLE [IF EXISTS] table_name;
+    /// ```
+    ///
+    /// # 行为
+    ///
+    /// - 依次解析 `DROP` 与 `TABLE` 关键字。
+    /// - 如果存在 `IF EXISTS` 子句，则记录 `if_exists = true`。
+    /// - 随后解析下一个标识符作为表名。
+    ///
+    /// # 返回值
+    ///
+    /// 成功时返回 [`ast::Statement::DropTable`] 枚举变体，包含：
+    /// - `name`：要删除的表名。
+    /// - `if_exists`：是否包含 `IF EXISTS` 子句。
+    ///
+    /// # 错误
+    ///
+    /// 当出现以下情况时会返回错误：
+    /// - 缺少 `DROP`、`TABLE`、`IF`、`EXISTS` 等关键字。
+    /// - 缺少表名标识符或标识符无效。
+    /// - 出现未预期的 token。
+    ///
+    /// # 示例
+    ///
+    /// ```text
+    /// use crate::sql::parser::Parser;
+    ///
+    /// let mut parser = Parser::new("DROP TABLE IF EXISTS users;");
+    /// let stmt = parser.parse_drop_table().unwrap();
+    /// assert_eq!(
+    ///     stmt,
+    ///     ast::Statement::DropTable {
+    ///         name: "users".to_string(),
+    ///         if_exists: true,
+    ///     }
+    /// );
+    /// ```
+    fn parse_drop_table(&mut self) -> Result<Statement> {
+        self.expect(Keyword::Drop.into())?;
+        self.expect(Keyword::Table.into())?;
+        let mut if_exists = false;
+        // IF EXISTS 判断
+        if self.next_is(Keyword::If.into()) {
+            self.expect(Token::Keyword(Keyword::Exists).into())?;
+            if_exists = true;
+        }
+        let name = self.next_ident()?;
+        Ok(Statement::DropTable { name, if_exists })
+    }
+
+    /// 条件块构建
+    fn parse_where(&mut self) -> Result<Option<Expression>> {
+        if !self.next_is(Keyword::Where.into()) {
+            return Ok(None);
+        }
+        Ok(Some(self.parse_expression()?))
+    }
+    /// 分组块构建
+    fn parse_group_by(&mut self) -> Result<Vec<Expression>> {
+        if !self.next_is(Keyword::Group.into()) {
+            return Ok(vec![]);
+        }
+        let mut result = Vec::new();
+        self.expect(Keyword::By.into())?;
+        loop {
+            result.push(self.parse_expression()?);
+            if !self.next_is(Token::Comma.into()) {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+    /// order by
+    fn parse_order_by(&mut self) -> Result<Vec<(Expression, Direction)>> {
+        if !self.next_is(Keyword::Order.into()) {
+            return Ok(vec![]);
+        }
+        let mut result = Vec::new();
+        self.expect(Keyword::By.into())?;
+        loop {
+            let expression = self.parse_expression()?;
+            let order = self.next_if_map(|token|
+                match token {
+                    Token::Keyword(Keyword::Asc) => Some(Direction::Asc),
+                    Token::Keyword(Keyword::Desc) => Some(Direction::Desc),
+                    _ => None,
+                }
+            ).unwrap_or_default();
+            result.push((expression, order));
+
+            if !self.next_is(Token::Comma.into()) {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+
+    /// Limit
+    fn parse_limit(&mut self) -> Result<Option<Expression>> {
+        if !self.next_is(Keyword::Limit.into()) {
+            return Ok(None);
+        }
+        Ok(Some(self.parse_expression()?))
+    }
+
+    /// offset
+    fn parse_offset(&mut self) -> Result<Option<Expression>> {
+        if !self.next_is(Keyword::Offset.into()) {
+            return Ok(None);
+        }
+        Ok(Some(self.parse_expression()?))
+    }
+
+    /// having
+    fn parse_having(&mut self) -> Result<Option<Expression>> {
+        if !self.next_is(Keyword::Having.into()) {
+            return Ok(None);
+        }
+        Ok(Some(self.parse_expression()?))
+    }
+
+    /// from table t/ as t
+    fn parse_from_table(&mut self) -> Result<ast::From> {
+        let name = self.next_ident()?;
+        let mut alias = None;
+        if self.next_is(Keyword::As.into())
+            || matches!(self.peek()?,Some(Token::Identifier(_))) {
+            alias = Some(self.next_ident()?);
+        }
+        Ok(ast::From::Table {
+            name,
+            alias,
+        })
+    }
+
+    /// 表链接类型
+    fn parse_from_join(&mut self) -> Result<Option<JoinType>> {
+        let keywords = vec![
+            Keyword::Join,
+            Keyword::Cross,
+            Keyword::Inner,
+            Keyword::Left,
+            Keyword::Right,
+        ];
+        let Some(join_type) = self.next_matches(keywords) else {
+            return Ok(None);
+        };
+        match join_type {
+            Token::Keyword(Keyword::Join) => Ok(Some(JoinType::Inner)),
+            Token::Keyword(Keyword::Cross) => {
+                self.expect(Keyword::Join.into())?;
+                Ok(Some(JoinType::Cross))
+            }
+            Token::Keyword(Keyword::Inner) => {
+                self.expect(Keyword::Join.into())?;
+                Ok(Some(JoinType::Inner))
+            }
+            Token::Keyword(Keyword::Left) => {
+                self.expect(Keyword::Join.into())?;
+                Ok(Some(JoinType::Left))
+            }
+            Token::Keyword(Keyword::Right) => {
+                self.expect(Keyword::Join.into())?;
+                Ok(Some(JoinType::Right))
+            }
+            _ => Ok(None)
+        }
+    }
+
+    /// 表数据删除
+    fn parse_delete(&mut self) -> Result<Statement> {
+        todo!()
+    }
+
+    /// 表数据新增
+    fn parse_insert(&mut self) -> Result<Statement> {
+        todo!()
+    }
+
+    /// 查询
+    fn parse_select(&mut self) -> Result<Statement> {
+        todo!()
+    }
+
+    /// 更新
+    fn parse_update(&mut self) -> Result<Statement> {
+        todo!()
+    }
     /// 使用“优先级爬升算法（precedence climbing algorithm）”解析表达式。参考：
     ///
     /// <https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing>
@@ -995,18 +1203,32 @@ mod tests {
     fn parser_create_table() -> crate::db_error::Result<()> {
         // 定义一个建表语句
         let create_table = "create table ACT_RU_JOB (
-            ID_ varchar NOT NULL,
-            REV_ integer,
-            LOCK_EXP_TIME_ time NULL,
-            LOCK_OWNER_ varchar,
-            EXCLUSIVE_ boolean,
-            RETRIES_ integer,
-            TENANT_ID_ varchar default '',
-            primary key (ID_)
-        ) ";
+            ID varchar NOT NULL primary key,
+            REV integer,
+            LOCK_OWNER varchar,
+            EXCLUSIVE boolean,
+            RETRIES integer,
+            TENANT_ID varchar default ''
+        )";
         // 创建语法分析器
         let mut parser = Parser::new(create_table);
         println!("{:?}", parser.parse_statement()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_where_clause() -> crate::db_error::Result<()> {
+        let where_clause = "WHERE REV IS NOT NULL";
+        let mut parser = Parser::new(where_clause);
+        println!("{:?}", parser.parse_where()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_group_by() -> crate::db_error::Result<()> {
+        let group_by = "GROUP BY REV";
+        let mut parser = Parser::new(group_by);
+        println!("{:?}", parser.parse_group_by()?);
         Ok(())
     }
 }
