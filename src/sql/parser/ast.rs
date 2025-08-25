@@ -97,7 +97,7 @@ pub enum From {
         left: Box<From>,
         right: Box<From>,
         r#type: JoinType,
-        predicates: Option<Expression>,
+        predicate: Option<Expression>,
     },
 }
 
@@ -198,7 +198,7 @@ pub struct Column {
 ///
 /// - `Operator(Operator)`
 ///   运算符表达式（如 `+`、`-`、`>` 等），可与其它表达式组合形成更复杂的逻辑或算术运算。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     /// 所有列
     All,
@@ -253,7 +253,7 @@ impl Hash for Literal {
 
 
 /// 表达式操作
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
     /// a and b
     And(Box<Expression>, Box<Expression>),
