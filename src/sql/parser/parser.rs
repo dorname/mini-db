@@ -30,7 +30,12 @@ impl<'a> Parser<'a> {
     /// 一个输入必须事单独的一个语句可以通过分号标识结尾
     pub fn pasre(statement: &str) -> Result<Statement> {
         let mut parser = Parser::new(statement);
-        todo!()
+        let statement = parser.parse_statement()?;
+        parser.skip(Token::Semicolon);
+        if let Some(token) = parser.lexer.next().transpose()? {
+            return errinput!("unexpected token: {:?}", token);
+        }
+        Ok(statement)
     }
 
     fn peek(&mut self) -> Result<Option<&Token>> {
@@ -160,7 +165,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// 解析 SQL `BEGIN` 语句，并返回对应的 [`ast::Statement::Begin`] 节点。
+    /// 解析 SQL `BEGIN` 语句，并返回对应的 [`Statement::Begin`] 节点。
     ///
     /// 支持以下语法变体：
     /// - `BEGIN`
@@ -351,7 +356,7 @@ impl<'a> Parser<'a> {
     ///
     /// # 返回值
     ///
-    /// 成功时返回 [`ast::Statement::DropTable`] 枚举变体，包含：
+    /// 成功时返回 [`Statement::DropTable`] 枚举变体，包含：
     /// - `name`：要删除的表名。
     /// - `if_exists`：是否包含 `IF EXISTS` 子句。
     ///
@@ -664,7 +669,7 @@ impl<'a> Parser<'a> {
     ///
     /// # 返回值
     ///
-    /// 返回一个 [`ast::Expression`]，表示完整的抽象语法树表达式。
+    /// 返回一个 [`Expression`]，表示完整的抽象语法树表达式。
     /// 如果输入非法，则返回错误。
     ///
     /// # 可能的错误
@@ -793,7 +798,7 @@ impl<'a> Parser<'a> {
     ///
     /// # 返回值
     ///
-    /// 成功时返回一个 [`ast::Expression`]，表示已解析的原子表达式。
+    /// 成功时返回一个 [`Expression`]，表示已解析的原子表达式。
     ///
     /// # 错误
     ///
@@ -839,11 +844,11 @@ impl<'a> Parser<'a> {
                 Token::Keyword(Keyword::False) => Literal::Boolean(false).into(),
                 Token::Keyword(Keyword::Infinity) => Literal::Float(f64::INFINITY).into(),
                 Token::Keyword(Keyword::NaN) => Literal::Float(f64::NAN).into(),
-                Token::Keyword(Keyword::Null) => Literal::Null.into(),
+                Token::Keyword(Keyword::Null) => Null.into(),
 
                 //函数调用
                 Token::Identifier(name) if self.next_is(Token::OpenParen) => {
-                    let mut args = Vec::new();;
+                    let mut args = Vec::new();
                     while !self.next_is(Token::CloseParen) {
                         if !args.is_empty() {
                             self.expect(Token::Comma)?;
@@ -930,7 +935,7 @@ impl<'a> Parser<'a> {
             let not = self.next_is(Token::Keyword(Keyword::Not));
             // 获取值 null/nan
             let val = match self.next()? {
-                Token::Keyword(Keyword::Null) => Literal::Null,
+                Token::Keyword(Keyword::Null) => Null,
                 Token::Keyword(Keyword::NaN) => Literal::Float(f64::NAN),
                 token => return errinput!("unexpected token {:?}",token),
             };
@@ -1185,7 +1190,7 @@ impl PostfixOp {
     }
 
     /// Builds an AST expression for the operator.
-    fn into_expression(self, lhs: ast::Expression) -> ast::Expression {
+    fn into_expression(self, lhs: Expression) -> Expression {
         let lhs = Box::new(lhs);
         match self {
             Self::Factor => ast::Operator::Factor(lhs).into(),
