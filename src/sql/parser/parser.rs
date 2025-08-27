@@ -3,8 +3,11 @@ use crate::db_error::Result;
 use crate::errinput;
 use crate::sql::parser::ast;
 use crate::sql::parser::ast::Literal::Null;
+use crate::sql::parser::ast::Statement::{Delete, Insert, Select};
 use crate::sql::parser::lexer::{Keyword, Lexer, Token};
 use crate::types::DataType;
+use std::cmp::PartialEq;
+use std::collections::BTreeMap;
 use std::iter::Peekable;
 use std::ops::Add;
 
@@ -161,6 +164,12 @@ impl<'a> Parser<'a> {
             Token::Keyword(Keyword::Explain) => self.parse_explain(),
             // 表操作
             Token::Keyword(Keyword::Create) => self.parse_create_table(),
+            Token::Keyword(Keyword::Drop) => self.parse_drop_table(),
+            // CRUD
+            Token::Keyword(Keyword::Update) => self.parse_update(),
+            Token::Keyword(Keyword::Delete) => self.parse_delete(),
+            Token::Keyword(Keyword::Select) => self.parse_select(),
+            Token::Keyword(Keyword::Insert) => self.parse_insert(),
             _ => errinput!("Unexpected token{:?}",token),
         }
     }
@@ -517,24 +526,155 @@ impl<'a> Parser<'a> {
     }
 
     /// 表数据删除
+    /// ```text
+    /// delete from {table_name} where x > 1;
+    /// ```
     fn parse_delete(&mut self) -> Result<Statement> {
-        todo!()
+        self.expect(Keyword::Delete.into())?;
+        self.expect(Keyword::From.into())?;
+        Ok(Delete {
+            table: self.next_ident()?,
+            r#where: self.parse_where()?,
+        })
     }
 
     /// 表数据新增
+    /// ```text
+    /// insert into {table_name} ({column_1,...,column_n}) values ({value_1,...,value_n});
+    /// ```
     fn parse_insert(&mut self) -> Result<Statement> {
-        todo!()
+        self.expect(Keyword::Insert.into())?;
+        self.expect(Keyword::Into.into())?;
+        let table = self.next_ident()?;
+
+        let mut columns = None;
+        if self.next_is(Token::OpenParen.into()) {
+            let columns = columns.insert(Vec::new());
+            loop {
+                columns.push(self.next_ident()?);
+                if !self.next_is(Token::Comma.into()) {
+                    break;
+                }
+            }
+            self.expect(Token::CloseParen)?;
+        }
+        self.expect(Keyword::Values.into())?;
+        let mut values = Vec::<Vec<Expression>>::new();
+        loop {
+            self.expect(Token::OpenParen)?;
+            let mut rows = Vec::new();
+            loop {
+                rows.push(self.parse_expression()?);
+                if !self.next_is(Token::Comma.into()) {
+                    break;
+                }
+            }
+            self.expect(Token::CloseParen)?;
+            values.push(rows);
+            if !self.next_is(Token::Comma.into()) {
+                break;
+            }
+        }
+        Ok(Insert {
+            table,
+            columns,
+            values,
+        })
     }
 
     /// 查询
     fn parse_select(&mut self) -> Result<Statement> {
-        todo!()
+        Ok(Select {
+            select: self.parse_select_clause()?,
+            from: self.parse_from_clause()?,
+            r#where: self.parse_where()?,
+            group_by: self.parse_group_by()?,
+            having: self.parse_having()?,
+            order_by: self.parse_order_by()?,
+            offset: self.parse_offset()?,
+            limit: self.parse_limit()?,
+        })
     }
 
     /// 更新
+    /// ```text
+    /// update {table_name} set {column_1} = {value_1}, {column_2} = {value_2} where x > 1;
+    /// ```
     fn parse_update(&mut self) -> Result<Statement> {
-        todo!()
+        self.expect(Keyword::Update.into())?;
+        let table = self.next_ident()?;
+        self.expect(Keyword::Set.into())?;
+        let mut set = BTreeMap::<String, Option<Expression>>::new();
+        loop {
+            let column = self.next_ident()?;
+            self.expect(Token::Equal)?;
+            let value = self.parse_expression()?;
+            set.insert(column, Some(value));
+            if !self.next_is(Token::Comma.into()) {
+                break;
+            }
+        }
+        Ok(Statement::Update {
+            table,
+            set,
+            r#where: self.parse_where()?,
+        })
     }
+
+    /// select_clause
+    fn parse_select_clause(&mut self) -> Result<Vec<(Expression, Option<String>)>> {
+        if !self.next_is(Keyword::Select.into()) {
+            return Ok(vec![]);
+        }
+        let mut select = Vec::new();
+        loop {
+            let expression = self.parse_expression()?;
+            let mut alias = None;
+            if self.next_is(Keyword::As.into()) || matches!(self.peek()?,Some(Token::Identifier(_))) {
+                if expression == Expression::All {
+                    return errinput!("can't alias");
+                }
+                alias = Some(self.next_ident()?);
+            }
+            select.push((expression, alias));
+            if !self.next_is(Token::Comma.into()) {
+                break;
+            }
+        }
+        Ok(select)
+    }
+
+    /// parse from clause
+    fn parse_from_clause(&mut self) -> Result<Vec<ast::From>> {
+        if !self.next_is(Keyword::From.into()) {
+            return Ok(Vec::new());
+        }
+        let mut from = Vec::new();
+        loop {
+            let mut from_item = self.parse_from_table()?;
+            while let Some(r#type) = self.parse_from_join()? {
+                let left = Box::new(from_item);
+                let right = Box::new(self.parse_from_table()?);
+                let mut predicate = None;
+                if r#type != JoinType::Cross {
+                    self.expect(Keyword::On.into())?;
+                    predicate = Some(self.parse_expression()?);
+                }
+                from_item = ast::From::Join {
+                    left,
+                    right,
+                    r#type,
+                    predicate,
+                };
+            }
+            from.push(from_item);
+            if !self.next_is(Token::Comma.into()) {
+                break;
+            }
+        }
+        Ok(from)
+    }
+
     /// 使用“优先级爬升算法（precedence climbing algorithm）”解析表达式。参考：
     ///
     /// <https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing>
@@ -1234,6 +1374,86 @@ mod tests {
         let group_by = "GROUP BY REV";
         let mut parser = Parser::new(group_by);
         println!("{:?}", parser.parse_group_by()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_having() -> crate::db_error::Result<()> {
+        let having = "HAVING COUNT(*) > 1";
+        let mut parser = Parser::new(having);
+        println!("{:?}", parser.parse_having()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_order_by() -> crate::db_error::Result<()> {
+        let order_by = "ORDER BY A.REV DESC";
+        let mut parser = Parser::new(order_by);
+        println!("{:?}", parser.parse_order_by()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_select() -> crate::db_error::Result<()> {
+        let select = "SELECT A.ID, A.REV FROM ACT_RU_JOB A WHERE A.REV IS NOT NULL";
+        let mut parser = Parser::new(select);
+        println!("{:?}", parser.parse_select()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_insert() -> crate::db_error::Result<()> {
+        let insert = "INSERT INTO ACT_RU_JOB (ID, REV) VALUES ('1', '2')";
+        let mut parser = Parser::new(insert);
+        println!("{:?}", parser.parse_insert()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_update() -> crate::db_error::Result<()> {
+        let update = "UPDATE ACT_RU_JOB SET REV = '2' WHERE ID = '1'";
+        let mut parser = Parser::new(update);
+        println!("{:?}", parser.parse_update()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_delete() -> crate::db_error::Result<()> {
+        let delete = "DELETE FROM ACT_RU_JOB WHERE ID = '1'";
+        let mut parser = Parser::new(delete);
+        println!("{:?}", parser.parse_delete()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_explain() -> crate::db_error::Result<()> {
+        let explain = "EXPLAIN SELECT A.ID, A.REV FROM ACT_RU_JOB A WHERE A.REV IS NOT NULL";
+        let mut parser = Parser::new(explain);
+        println!("{:?}", parser.parse_explain()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_begin() -> crate::db_error::Result<()> {
+        let begin = "BEGIN";
+        let mut parser = Parser::new(begin);
+        println!("{:?}", parser.parse_begin()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_commit() -> crate::db_error::Result<()> {
+        let commit = "COMMIT";
+        let mut parser = Parser::new(commit);
+        println!("{:?}", parser.parse_commit()?);
+        Ok(())
+    }
+
+    #[test]
+    fn parser_rollback() -> crate::db_error::Result<()> {
+        let rollback = "ROLLBACK";
+        let mut parser = Parser::new(rollback);
+        println!("{:?}", parser.parse_rollback()?);
         Ok(())
     }
 }
