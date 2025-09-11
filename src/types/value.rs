@@ -45,7 +45,7 @@
 //! - 浮点序列化与哈希的“负号归一化”仅用于**存储键一致性**，不改变运行期的数值语义。
 
 use std::fmt::{Display, Formatter};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize,Serializer};
 
 /// 原始的 SQL 数据类型。为简化实现，仅支持少量标量类型（不支持复合类型）。
 /// 符合类型后面再拓展
@@ -73,3 +73,44 @@ impl Display for DataType {
     }
 }
 
+
+#[derive(Clone,Debug,Deserialize,Serialize)]
+pub enum Value {
+    Null,
+    Boolean(bool),
+    Integer(i64),
+    Float(#[serde(serialize_with = "serialize_f64")] f64),
+    String(String),
+}
+
+impl crate::utils::Value for Value {}
+
+
+/// 将 f64 的 -0.0 和 -NaN 序列化为正数，
+/// 以便它们在键值存储中被视为相等（例如用于索引查找）。
+fn serialize_f64<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    let mut value = *value;
+    if (value.is_nan() || value == 0.0) && value.is_sign_negative() {
+        value = -value;
+    }
+    serializer.serialize_f64(value)
+}
+
+/// 考虑空值(Nulls和 +-NaNs) 等值比较. Rust 已经考虑了 -0.0 == 0.0
+/// 这里主要考虑f64和整形
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self,other) {
+            (Self::Boolean(a),Self::Boolean(b)) => a == b,
+            (Self::Integer(a),Self::Integer(b)) => a == b,
+            (Self::Integer(a),Self::Float(b)) => *a as f64 == *b,
+            (Self::Float(a),Self::Float(b)) => a == b,
+            (Self::Float(a),Self::Integer(b)) => *a == *b as f64,
+            (Self::String(a),Self::String(b)) => a == b,
+            (Self::Null,Self::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
