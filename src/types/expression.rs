@@ -1,3 +1,1 @@
-use serde::{Deserialize,Serialize};
-#[derive(Clone,Debug,PartialEq,Deserialize,Serialize)]
-pub enum Expression {}
+pub use crate::sql::parser::ast::Expression;

@@ -1,8 +1,6 @@
 use crate::types::DataType;
-use serde::de::Visitor;
 use std::collections::BTreeMap;
 use std::hash::Hash;
-use std::ops::Mul;
 
 #[derive(Debug)]
 pub enum Statement {
@@ -102,7 +100,7 @@ pub enum From {
 }
 
 /// 连接类型
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JoinType {
     Cross,
     Inner,
@@ -123,7 +121,7 @@ impl JoinType {
 }
 
 /// 升降序
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum Direction {
     #[default]
     Asc,
