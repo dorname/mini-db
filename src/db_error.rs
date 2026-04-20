@@ -222,7 +222,9 @@ mod tests {
     use crate::db_error;
 
     #[test]
-    fn test_err_data() -> db_error::Result<()> {
-        errdata!("test")
+    fn test_err_data() {
+        let result: db_error::Result<()> = errdata!("test");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), db_error::Error::InvalidData("test".to_string()));
     }
 }

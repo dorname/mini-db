@@ -22,6 +22,7 @@ use tsid::create_tsid;
 pub struct BitCask {
     log: Option<Log>,
     keydir: KeyDir,
+    db_base: String,
 }
 
 impl BitCask {
@@ -29,12 +30,16 @@ impl BitCask {
     /// 2、构建全局KeyDir——索引
     /// 3、打开活跃的存储文件
     pub fn init_db() -> Result<Self> {
-        let db_base = get_db_base();
+        Self::init_db_with_base(get_db_base())
+    }
+
+    fn init_db_with_base(db_base: String) -> Result<Self> {
         let path = Path::new(db_base.as_str());
         let mut log_file_id = create_tsid().number().to_string() + "_active";
         let mut db = Self {
             log: None,
             keydir: KeyDir::new(),
+            db_base: db_base.clone(),
         };
         if path.is_dir() {
             //1 、遍历目录下的所有文件收集所有文件路径
@@ -78,8 +83,16 @@ impl BitCask {
                 });
             }
         }
-        db.log = Some(Log::new(log_file_id)?);
+        db.log = Some(Log::new_with_base(log_file_id, db_base)?);
         Ok(db)
+    }
+
+    pub fn init_db_at(path: &Path) -> Result<Self> {
+        let mut base = path.to_string_lossy().to_string();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        Self::init_db_with_base(base)
     }
     /// 构建索引
     fn build_key_dir(&mut self, file_path: &PathBuf) -> Result<String> {
@@ -142,7 +155,7 @@ impl BitCask {
 
     /// 更新存储文件
     fn refresh_active(&mut self) {
-        let db_base = get_db_base();
+        let db_base = self.db_base.clone();
         //1、将当前活跃文件设置为非活跃文件
         let file_id = self.log.as_mut().unwrap().file_id.clone();
         fs::rename(
@@ -158,7 +171,7 @@ impl BitCask {
             .expect("重命名失败");
         //2、创建新的活跃文件
         let new_file_id = create_tsid().number().to_string() + "_active";
-        let new_log = Log::new(new_file_id).unwrap();
+        let new_log = Log::new_with_base(new_file_id, self.db_base.clone()).unwrap();
         self.log = Some(new_log);
     }
 
@@ -187,7 +200,7 @@ impl BitCask {
                 if file_id.eq(&active_file_id) {
                     return Ok(Some(active.as_ref().unwrap().to_owned())); // 返回 Log 的克隆
                 }
-                let log = Log::new(file_id.to_string())?; // 创建新的 Log 实例
+                let log = Log::new_with_base(file_id.to_string(), self.db_base.clone())?; // 创建新的 Log 实例
                 Ok(Some(log)) // 返回新的 Log 实例
             }
         }
@@ -198,11 +211,11 @@ impl BitCask {
     /// 1、创建新的活跃日志文件，将所有活跃的键写入新的日志文件
     /// 2、删除旧的活跃日志文件
     fn compact(&mut self) -> Result<()> {
-        let db_base = get_db_base();
+        let db_base = self.db_base.clone();
         // 3、根据旧文件名删除旧的活跃日志文件
         let old_file_id = self.log.as_ref().unwrap().file_id.clone();
         // 1、创建新的活跃日志文件
-        let new_log = Log::new(create_tsid().number().to_string() + "_active")?;
+        let new_log = Log::new_with_base(create_tsid().number().to_string() + "_active", self.db_base.clone())?;
         self.log = Some(new_log);
         fn write(log: &mut Log, key: Vec<u8>, value: Vec<u8>) -> Result<u64> {
             let tstamp = crate::utils::get_timestamp_to_vec();
@@ -214,7 +227,11 @@ impl BitCask {
         let keydir = self.keydir.clone();
         for (key, _) in keydir.iter() {
             let value = self.get(key)?;
-            write(self.log.as_mut().unwrap(), key.clone(), value.unwrap())?;
+            let crc_pos = write(self.log.as_mut().unwrap(), key.clone(), value.unwrap())?;
+            self.keydir.insert(
+                key.clone(),
+                (self.log.as_ref().unwrap().file_id.clone(), crc_pos as u32),
+            );
         }
         self.flush()?;
         fs::remove_file(Path::new(&(db_base.clone() + old_file_id.as_str())))?;
@@ -337,7 +354,7 @@ impl Engine for BitCask {
     }
 
     fn status(&mut self) -> Result<EngineStatus> {
-        let db_base = get_db_base();
+        let db_base = self.db_base.clone();
         //1、获取所有key
         let keys = self.keydir.keys().cloned().collect::<Vec<_>>();
         // 获取所有存活的key
@@ -496,7 +513,7 @@ pub(super) struct LogEntry {
 #[allow(dead_code)]
 impl LogEntry {
     /// 初始化日志条目
-    /// ```
+    /// ```ignore
     /// let tstamp = mini_db::utils::get_timestamp_to_vec();
     /// let key = "key".as_bytes().to_vec();
     /// let value = "value".as_bytes().to_vec();
@@ -519,7 +536,7 @@ impl LogEntry {
     }
 
     /// 构建完整性校验字段
-    /// ```
+    /// ```ignore
     /// let tstamp = mini_db::utils::get_timestamp_to_vec();
     /// let key = "key".as_bytes().to_vec();
     /// let value = "value".as_bytes().to_vec();
@@ -607,8 +624,11 @@ impl Log {
     /// 创建一个新的日志存储文件
     /// 或者打开一个活跃存储文件
     fn new(file_id: String) -> Result<Self> {
-        let db_base = get_db_base();
-        let path = PathBuf::from(db_base.clone() + file_id.as_str());
+        Self::new_with_base(file_id, get_db_base())
+    }
+
+    fn new_with_base(file_id: String, db_base: String) -> Result<Self> {
+        let path = PathBuf::from(db_base + file_id.as_str());
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?
         }
@@ -711,25 +731,12 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cfg::{override_config_for_test, test_config_with_path};
+    use tempfile::TempDir;
 
-    use crate::{cfg::watch_config, init_tracing};
-    use sha3::{Digest, Sha3_256};
-    use std::{fs::read_dir, time::Duration};
-
-    use tokio::{sync::broadcast, time};
-    use tracing::info;
-
-    #[test]
-    fn sha3_test() {
-        // 1) 创建一个 Sha3_256 hasher
-        let mut h = Sha3_256::new();
-        h.update("abc".as_bytes());
-        let result = h.finalize();
-        assert_eq!(result.to_vec().len(), 32);
-        assert_eq!(
-            hex::encode(result.to_vec()),
-            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"
-        );
+    fn setup(temp_dir: &TempDir) {
+        let config = test_config_with_path(temp_dir.path().to_path_buf());
+        override_config_for_test(config);
     }
 
     #[test]
@@ -756,17 +763,15 @@ mod tests {
         assert_eq!(value_sz.to_be_bytes().to_vec(), [0, 0, 0, 5]);
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
-        println!("{:?}", log.crc);
-        println!("{:?}", log.get_entry());
+        let entry = log.get_entry();
+        assert_eq!(entry.len(), 8 + 4 + 4 + 4 + 3 + 5);
     }
 
     #[test]
     fn test_wr_log() {
-        // 创建一个活跃文件
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
         let file_id = create_tsid().number().to_string() + "_active";
-        let db_base = get_db_base();
-        let temp_path = db_base.clone() + file_id.as_str();
-        println!("{:?}", temp_path);
         let mut log_db = Log::new(file_id).unwrap();
         let tstamp = crate::utils::get_timestamp_to_vec();
         let key = "test_1".as_bytes().to_vec();
@@ -774,178 +779,270 @@ mod tests {
         let mut log = LogEntry::new(tstamp, key, value);
         log.build_crc();
         let _ = log_db.write_entry(log);
-        // 读取数据
         let log_entry = log_db.read_entry(0u32).unwrap().unwrap();
-        println!("{:?}", log_entry);
         assert_eq!("test-3333", String::from_utf8_lossy(&log_entry.value));
-        // 删除测试文件
-        fs::remove_file(temp_path).unwrap();
     }
 
     #[test]
-    #[ignore]
-    fn test_read_log() {
-        let file_id = "696392295149515530_active".to_string();
-        let log_db = Log::new(file_id).unwrap();
-        let pos = 23u64;
-        let mut buf = vec![0u8; 5];
-        let mut file = log_db.file.lock().unwrap();
-        file.seek(SeekFrom::Start(pos)).unwrap();
-        file.read_exact(&mut buf).unwrap();
-        println!("{:?}", String::from_utf8_lossy(&buf));
+    fn test_crud() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        let key = b"foo";
+        let value = b"bar";
+
+        // Create
+        db.set(key, value).unwrap();
+        assert_eq!(db.get(key).unwrap().unwrap(), value);
+
+        // Update
+        let value2 = b"baz";
+        db.set(key, value2).unwrap();
+        assert_eq!(db.get(key).unwrap().unwrap(), value2);
+
+        // Delete
+        db.delete(key).unwrap();
+        assert!(db.get(key).unwrap().is_none());
     }
 
     #[test]
-    #[ignore]
-    fn test_read_entry() {
-        let file_id = "675727592794104102_active".to_string();
-        let mut log_db = Log::new(file_id).unwrap();
-        // println!("{:?}", log_db.read_entry(0u32));
-        let log_entry = log_db.read_entry(57u32).unwrap().unwrap();
-        println!("{:?}", log_entry);
-        println!("{:?}", String::from_utf8_lossy(&log_entry.value));
-    }
+    fn test_multiple_keys() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
 
-    #[test]
-    #[ignore]
-    fn test_write_entry() {
-        let file_id = "675727592794104102_active".to_string();
-        let mut log_db = Log::new(file_id).unwrap();
-        let tstamp = crate::utils::get_timestamp_to_vec();
-        let key = "key_1".as_bytes().to_vec();
-        let value = "value_1".as_bytes().to_vec();
-        let mut log = LogEntry::new(tstamp, key, value);
-        log.build_crc();
-        let _ = log_db.write_entry(log);
-    }
+        for i in 0..100u32 {
+            let key = format!("key_{:03}", i);
+            let value = format!("value_{:03}", i);
+            db.set(key.as_bytes(), value.as_bytes()).unwrap();
+        }
 
-    #[test]
-    #[ignore]
-    fn test_files_iter() {
-        let db_base = get_db_base();
-        let path = Path::new(db_base.as_str());
-        // 1、遍历文件目录
-        if path.is_dir() {
-            for file_entry in read_dir(path).unwrap() {
-                let file_path = file_entry.unwrap().path();
-                if file_path.is_file() {
-                    let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap();
-                    println!("{:?}", file_name.ends_with("active"));
-                }
-            }
+        for i in 0..100u32 {
+            let key = format!("key_{:03}", i);
+            let expected = format!("value_{:03}", i);
+            let actual = db.get(key.as_bytes()).unwrap().unwrap();
+            assert_eq!(actual, expected.as_bytes());
         }
     }
 
     #[test]
-    #[ignore]
-    fn test_init_db() {
-        let db = BitCask::init_db().unwrap();
-        // 当key值相同时会出现索引覆盖
-        println!("{:?}", db);
+    fn test_scan_range() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        db.set(b"a", b"1").unwrap();
+        db.set(b"b", b"2").unwrap();
+        db.set(b"c", b"3").unwrap();
+        db.set(b"d", b"4").unwrap();
+
+        let mut results: Vec<(String, String)> = db
+            .scan(b"b".to_vec()..b"d".to_vec())
+            .map(|r| {
+                let (k, v) = r.unwrap();
+                (String::from_utf8(k).unwrap(), String::from_utf8(v).unwrap())
+            })
+            .collect();
+        // BTreeMap 有序，范围 [b, d) 包含 b、c
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], ("b".to_string(), "2".to_string()));
+        assert_eq!(results[1], ("c".to_string(), "3".to_string()));
+
+        // 反向扫描
+        results = db
+            .scan(b"b".to_vec()..b"d".to_vec())
+            .rev()
+            .map(|r| {
+                let (k, v) = r.unwrap();
+                (String::from_utf8(k).unwrap(), String::from_utf8(v).unwrap())
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], ("c".to_string(), "3".to_string()));
+        assert_eq!(results[1], ("b".to_string(), "2".to_string()));
     }
 
     #[test]
-    fn test_get() {
-        // 清理测试数据
-        let mut db = BitCask::init_db().unwrap();
-
-        // 写入测试数据
-        let key = "key_4".as_bytes();
-        let value = "test".as_bytes();
-        // println!("开始写入数据");
-        let _ = db.set(key, value);
-        println!(
-            "写入文件位置指针:{:?}",
-            db.get_log_by_key(key.to_vec())
-                .unwrap()
-                .unwrap()
-                .file
-                .lock()
-                .unwrap()
-                .stream_position()
-        );
-
-        // 读取测试数据
-        println!("开始读取数据");
-        match db.get(key) {
-            Ok(Some(val)) => {
-                println!("读取成功: {:?}", val);
-                assert_eq!(val, value);
-            }
-            Ok(None) => {
-                panic!("未找到键: {:?}", String::from_utf8_lossy(&key));
-            }
-            Err(e) => {
-                panic!("读取数据时出错: {}", e);
-            }
+    fn test_flush_and_reopen() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        {
+            let mut db = BitCask::init_db_at(dir.path()).unwrap();
+            db.set(b"persist_key", b"persist_val").unwrap();
+            db.flush().unwrap();
         }
+        // reopen
+        let db = BitCask::init_db_at(dir.path()).unwrap();
+        assert_eq!(db.get(b"persist_key").unwrap().unwrap(), b"persist_val");
     }
 
     #[test]
-    #[ignore]
-    fn generate_id_test() {
-        println!(
-            "{:?}",
-            create_tsid().number().to_string().parse::<u64>().unwrap()
-        );
-        println!("{:?}", create_tsid().number().to_string());
+    fn test_delete_is_tombstone() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        {
+            let mut db = BitCask::init_db_at(dir.path()).unwrap();
+            db.set(b"del_me", b"val").unwrap();
+            db.delete(b"del_me").unwrap();
+        }
+        let db = BitCask::init_db_at(dir.path()).unwrap();
+        assert!(db.get(b"del_me").unwrap().is_none());
     }
 
     #[test]
-    fn test_set() {
-        let mut db = BitCask::init_db().unwrap();
-        // db.set(10u32.to_be_bytes().to_vec(), "");
-        let _ = db.set(&"key_1".as_bytes().to_vec(), &"value_1".as_bytes().to_vec());
-        assert_eq!(
-            db.get(&"key_1".as_bytes().to_vec()).unwrap().unwrap(),
-            "value_1".as_bytes().to_vec()
-        );
+    fn test_status_accuracy() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        db.set(b"k1", b"v1").unwrap();
+        db.set(b"k2", b"v2").unwrap();
+        db.set(b"k3", b"v3").unwrap();
+
+        let status = db.status().unwrap();
+        assert_eq!(status.name, "bitcask");
+        assert_eq!(status.total_count, 3);
+        assert!(status.total_size > 0);
+        assert!(status.live_size > 0);
+        assert_eq!(status.garbage_size, status.total_size - status.live_size);
     }
 
     #[test]
-    #[ignore]
-    fn test_refresh_active() {
-        let mut db = BitCask::init_db().unwrap();
+    fn test_clear() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        db.set(b"k1", b"v1").unwrap();
+        db.set(b"k2", b"v2").unwrap();
+        db.clear().unwrap();
+
+        assert!(db.get(b"k1").unwrap().is_none());
+        assert!(db.get(b"k2").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_active_file_rotation() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        // 写入第一个 key
+        db.set(b"key1", b"value1").unwrap();
+        let active_before = db.log.as_ref().unwrap().file_id.clone();
+
+        // 手动触发 refresh_active
         db.refresh_active();
+        let active_after = db.log.as_ref().unwrap().file_id.clone();
+
+        assert_ne!(active_before, active_after);
+        assert!(active_after.ends_with("_active"));
+
+        // 旧文件应该已被重命名（去掉 _active 后缀）
+        let old_file_name = active_before.strip_suffix("_active").unwrap_or(&active_before);
+        let old_path = dir.path().join(old_file_name);
+        assert!(old_path.exists());
+
+        // 新 active 文件也应该存在
+        let new_path = dir.path().join(&active_after);
+        assert!(new_path.exists());
     }
 
     #[test]
-    #[ignore]
-    fn test_status() {
-        let mut db = BitCask::init_db().unwrap();
-        // db.set(&10u32.to_be_bytes().to_vec(), &"value_5".as_bytes().to_vec());
-        // db.delete(&10u32.to_be_bytes().to_vec());
-        // db.flush().unwrap();
-        println!("{:?}", db.status().unwrap());
-    }
+    fn test_compact_updates_keydir() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
 
-    use crate::cfg::CONFIG;
+        db.set(b"keep", b"keep_val").unwrap();
+        db.set(b"remove", b"remove_val").unwrap();
+        db.delete(b"remove").unwrap();
 
-    #[tokio::test]
-    async fn test_init_db_async() {
-        init_tracing();
-        let db = BitCask::init_db().unwrap();
-        watch_config(broadcast::channel(10).1).await;
-        info!("{:?}", db);
-        loop {
-            info!("{:?}", CONFIG.lock().unwrap());
-            time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn test_compact() {
-        let mut db = BitCask::init_db().unwrap();
-        println!("{:?}", db.status().unwrap());
-        // println!("{:?}", db.get("key_4".as_bytes().to_vec()).unwrap());
+        // compact 将所有存活 key 写入新的 active 文件
         db.compact().unwrap();
-        println!("{:?}", db.status().unwrap());
+
+        // 验证 compact 后数据仍然可读
+        assert_eq!(db.get(b"keep").unwrap().unwrap(), b"keep_val");
+        assert!(db.get(b"remove").unwrap().is_none());
     }
 
     #[test]
-    #[ignore]
-    fn test_minus() {
-        println!("{:?}", (-1i32).to_be_bytes());
+    fn test_overwrite_and_reopen() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        {
+            let mut db = BitCask::init_db_at(dir.path()).unwrap();
+            db.set(b"key", b"v1").unwrap();
+            db.set(b"key", b"v2").unwrap();
+            db.set(b"key", b"v3").unwrap();
+        }
+        let db = BitCask::init_db_at(dir.path()).unwrap();
+        assert_eq!(db.get(b"key").unwrap().unwrap(), b"v3");
+    }
+
+    #[test]
+    fn test_exists() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+        db.set(b"yes", b"1").unwrap();
+        assert!(db.exists(b"yes").unwrap());
+        assert!(!db.exists(b"no").unwrap());
+    }
+
+    #[test]
+    fn test_batch_set_and_batch_get() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        db.batch_set(vec![
+            (b"a".as_slice(), b"1".as_slice()),
+            (b"b".as_slice(), b"2".as_slice()),
+            (b"c".as_slice(), b"3".as_slice()),
+        ])
+        .unwrap();
+
+        let results = db.batch_get(vec![b"a", b"b", b"missing"]).unwrap();
+        assert_eq!(results[0], Some(b"1".to_vec()));
+        assert_eq!(results[1], Some(b"2".to_vec()));
+        assert_eq!(results[2], None);
+    }
+
+    #[test]
+    fn test_scan_prefix() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        db.set(b"prefix:a", b"1").unwrap();
+        db.set(b"prefix:b", b"2").unwrap();
+        db.set(b"other:c", b"3").unwrap();
+
+        let results: Vec<_> = db
+            .scan_prefix(b"prefix")
+            .map(|r| {
+                let (k, v) = r.unwrap();
+                (String::from_utf8(k).unwrap(), String::from_utf8(v).unwrap())
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|(k, _)| k == "prefix:a"));
+        assert!(results.iter().any(|(k, _)| k == "prefix:b"));
+    }
+
+    #[test]
+    fn test_delete_then_set_same_key() {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let mut db = BitCask::init_db_at(dir.path()).unwrap();
+
+        db.set(b"k", b"v1").unwrap();
+        db.delete(b"k").unwrap();
+        assert!(db.get(b"k").unwrap().is_none());
+
+        db.set(b"k", b"v2").unwrap();
+        assert_eq!(db.get(b"k").unwrap().unwrap(), b"v2");
     }
 }

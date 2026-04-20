@@ -585,18 +585,26 @@ impl<'a, I: engine::ScanIter> Iterator for VersionIterator<'a, I> {
 mod tests {
     use super::*;
     use crate::BitCask;
+    use crate::cfg::{override_config_for_test, test_config_with_path};
+    use tempfile::TempDir;
+
+    fn setup(temp_dir: &TempDir) {
+        let config = test_config_with_path(temp_dir.path().to_path_buf());
+        override_config_for_test(config);
+    }
 
     #[test]
-    #[ignore]
     fn test_create_mvcc() -> Result<()> {
-        let db = BitCask::init_db()?;
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
         let mvcc = MVCC::new(db);
         let txn = mvcc.begin()?;
         let key1 = "mvcc_key_1".as_bytes();
         let value1 = "mvcc_value_1".as_bytes();
         txn.set(key1, Some(value1))?;
         let result1 = txn.get(key1)?;
-        println!("{:?}", result1);
+        assert_eq!(result1, Some(value1.to_vec()));
         txn.commit()?;
         let read_txn = mvcc.begin_readonly()?;
         let read_key1 = read_txn.get(key1)?;
@@ -605,31 +613,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn test_version_encode() -> Result<()> {
-        let mut db = BitCask::init_db()?;
-        let version = 1u64;
-        let encoded = &KeyPrefix::ActiveWrite(version).encode()?;
-        println!("{:?}", encoded);
-        let val_encoded = &bin_coder::encode(None::<&[u8]>)?;
-        println!("{:?}", val_encoded);
-        db.set(encoded, &vec![])?;
-        db.get(encoded)?;
-        Ok(())
-    }
-
-    #[test]
-    /// 事务隔离行测试：
-    /// 初始情况
-    /// 1、创建一个读事务version：1
-    /// 2、创建一个写事务 version：1,并写入下一个版本号 version：2
-    /// 3、写入 键值 mvcc_set_key<=>mvcc_set_val
-    /// 4、用写事务读取 key,此时与真实值应该是相等的
-    /// 5、用读事务读取 key,因为 写事务版本小于读事务版本不成立(1 < 1 =>false) 所以事务隔离了，此时key为None
-    /// 6、开启一个新的读事务 version:2
-    /// 7、读取key,因为 写事务版本小于读事务版本(1<2=>true),故能读取到对应的key
     fn test_mvcc_isolation_1() -> Result<()> {
-        let db = BitCask::init_db()?;
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
         let mvcc = MVCC::new(db);
         let read_txn = mvcc.begin_readonly()?;
         let txn = mvcc.begin()?;
@@ -638,7 +625,6 @@ mod tests {
         txn.set(key, Some(value))?;
         assert_eq!(Some(value.to_vec()), txn.get(key)?);
         assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
-        // 如果不写事务提交，上述断言就会失败，但是按照执行顺序来看，上述断言应该报错才对
         txn.commit()?;
         assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
         let read_txn = mvcc.begin_readonly()?;
@@ -646,10 +632,11 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
     fn test_mvcc_isolation_2() -> Result<()> {
-        let db = BitCask::init_db()?;
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
         let mvcc = MVCC::new(db);
         let read_txn = mvcc.begin_readonly()?;
         let txn = mvcc.begin()?;
@@ -658,7 +645,6 @@ mod tests {
         txn.set(key, Some(value))?;
         assert_eq!(Some(value.to_vec()), txn.get(key)?);
         assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
-        // 如果不写事务提交，上述断言就会失败，但是按照执行顺序来看，上述断言应该报错才对
         txn.commit()?;
         assert_ne!(Some(value.to_vec()), read_txn.get(key)?);
         let read_txn = mvcc.begin_readonly()?;
@@ -673,32 +659,30 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
     fn test_begin_readonly() -> Result<()> {
-        let db = BitCask::init_db()?;
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
         let mvcc = MVCC::new(db);
-        let txn = mvcc.begin_readonly()?;
+        // 先写入数据
+        let txn = mvcc.begin()?;
         let key1 = "mvcc_key_1".as_bytes();
-        let result1 = txn.get(key1)?.unwrap();
-        println!("{:?}", String::from_utf8_lossy(&result1));
-        Ok(())
-    }
-
-    #[test]
-    #[ignore]
-    fn test_bin_coder() -> Result<()> {
-        let value = "mvcc_value_1".as_bytes();
-        let encoded = bin_coder::encode(Some(&value))?;
-        println!("{:?}", encoded);
-        let decoded: Option<Vec<u8>> = bin_coder::decode(&encoded)?;
-        println!("{:?}", decoded);
+        let value1 = "mvcc_value_1".as_bytes();
+        txn.set(key1, Some(value1))?;
+        txn.commit()?;
+        // 只读事务读取
+        let read_txn = mvcc.begin_readonly()?;
+        let result1 = read_txn.get(key1)?.unwrap();
+        assert_eq!(result1, value1);
         Ok(())
     }
 
     #[test]
     fn test_double_mvcc() -> Result<()> {
-        let db = BitCask::init_db()?;
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
         let mvcc = MVCC::new(db);
         let _ = mvcc.begin()?;
         let _ = mvcc.begin_readonly()?;
@@ -707,7 +691,9 @@ mod tests {
 
     #[test]
     fn test_rollback() -> Result<()> {
-        let db = BitCask::init_db()?;
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
         let mvcc = MVCC::new(db);
         let txn = mvcc.begin()?;
         let key1 = "mvcc_rollback_key".as_bytes();
@@ -731,16 +717,122 @@ mod tests {
     }
 
     #[test]
-    fn test_get_val() -> Result<()> {
-        let db = BitCask::init_db()?;
+    fn test_mvcc_commit_and_recover() -> Result<()> {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let key = b"recover_key";
+        let value = b"recover_val";
+        {
+            let db = BitCask::init_db_at(dir.path())?;
+            let mvcc = MVCC::new(db);
+            let txn = mvcc.begin()?;
+            txn.set(key, Some(value))?;
+            txn.commit()?;
+        }
+        // 重新打开数据库
+        let db = BitCask::init_db_at(dir.path())?;
         let mvcc = MVCC::new(db);
-        let txn = mvcc.begin()?;
         let read_txn = mvcc.begin_readonly()?;
-        let key1 = "mvcc_set_key_1".as_bytes();
-        let val = txn.get(key1)?.unwrap();
-        let original_value = read_txn.get(key1)?.unwrap();
-        println!("{:?}", String::from_utf8_lossy(&val));
-        println!("{:?}", String::from_utf8_lossy(&original_value));
+        assert_eq!(read_txn.get(key)?, Some(value.to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_write_conflict() -> Result<()> {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
+        let mvcc = MVCC::new(db);
+        let key = b"conflict_key";
+        let value1 = b"v1";
+        let value2 = b"v2";
+
+        let txn1 = mvcc.begin()?;
+        txn1.set(key, Some(value1))?;
+
+        let txn2 = mvcc.begin()?;
+        let result = txn2.set(key, Some(value2));
+        assert!(result.is_err(), "Expected write conflict but got ok");
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_delete_and_read() -> Result<()> {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
+        let mvcc = MVCC::new(db);
+        let key = b"del_key";
+        let value = b"del_val";
+
+        let txn = mvcc.begin()?;
+        txn.set(key, Some(value))?;
+        txn.commit()?;
+
+        let read_txn_old = mvcc.begin_readonly()?;
+
+        let txn_del = mvcc.begin()?;
+        txn_del.delete(key)?;
+        txn_del.commit()?;
+
+        assert_eq!(read_txn_old.get(key)?, Some(value.to_vec()));
+
+        let read_txn_new = mvcc.begin_readonly()?;
+        assert_eq!(read_txn_new.get(key)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_scan_visibility() -> Result<()> {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let db = BitCask::init_db_at(dir.path())?;
+        let mvcc = MVCC::new(db);
+        let key1 = b"scan_a";
+        let key2 = b"scan_b";
+        let value = b"v";
+
+        let txn = mvcc.begin()?;
+        txn.set(key1, Some(value))?;
+        txn.set(key2, Some(value))?;
+
+        let results: Vec<_> = txn.scan(..).collect::<Result<Vec<_>>>()?;
+        assert_eq!(results.len(), 2);
+
+        let read_txn = mvcc.begin_readonly()?;
+        let results: Vec<_> = read_txn.scan(..).collect::<Result<Vec<_>>>()?;
+        assert_eq!(results.len(), 0);
+
+        txn.commit()?;
+
+        let read_txn = mvcc.begin_readonly()?;
+        let results: Vec<_> = read_txn.scan(..).collect::<Result<Vec<_>>>()?;
+        assert_eq!(results.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_rollback_and_recover() -> Result<()> {
+        let dir = TempDir::new().unwrap();
+        setup(&dir);
+        let key = b"rollback_recover_key";
+        let original = b"original";
+        let new_val = b"new";
+        {
+            let db = BitCask::init_db_at(dir.path())?;
+            let mvcc = MVCC::new(db);
+            let txn = mvcc.begin()?;
+            txn.set(key, Some(original))?;
+            txn.commit()?;
+
+            let txn = mvcc.begin()?;
+            txn.set(key, Some(new_val))?;
+            txn.rollback()?;
+        }
+        let db = BitCask::init_db_at(dir.path())?;
+        let mvcc = MVCC::new(db);
+        let read_txn = mvcc.begin_readonly()?;
+        assert_eq!(read_txn.get(key)?, Some(original.to_vec()));
         Ok(())
     }
 }

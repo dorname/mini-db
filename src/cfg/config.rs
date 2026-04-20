@@ -6,10 +6,29 @@ use serde::{Deserialize, Serialize};
 use crate::db_error::Result;
 
 pub fn get_config_path() -> PathBuf {
-    let exe_path = env::current_exe().unwrap();
-    let exe_dir = exe_path.parent().unwrap();
-    let project_root = exe_dir.parent().unwrap().parent().unwrap();
-    project_root.join("/project/rust_base_learning/mini-db/config.toml")
+    // 1. 环境变量优先
+    if let Ok(path) = env::var("MINI_DB_CONFIG_PATH") {
+        return PathBuf::from(path);
+    }
+    // 2. 尝试从可执行文件路径推导（适用于 cargo run / cargo test）
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if let Some(project_root) = exe_dir.parent().and_then(|p| p.parent()) {
+                let candidate = project_root.join("config.toml");
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    // 3. 当前工作目录
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let candidate = cwd.join("config.toml");
+    if candidate.exists() {
+        return candidate;
+    }
+    // 4. 回退到硬编码路径（保持向后兼容）
+    PathBuf::from("/project/rust_base_learning/mini-db/config.toml")
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -103,6 +122,17 @@ impl Config {
 
     pub fn load_config() -> Result<Config> {
         let path = get_config_path();
+        if !path.exists() {
+            eprintln!("Config file not found at {:?}, using default config", path);
+            return Ok(Config {
+                storage_path: PathBuf::from("./db"),
+                single_file_limit: 1,
+                sync_strategy: SyncStrategy::Never,
+                fsync_inteval_ms: 1000,
+                compaction_threshold: 0.6,
+                file_cache_capacity: 32,
+            });
+        }
         // 1、读取配置文件
         let content = std::fs::read_to_string(path)?;
         // 2、解析配置文件
